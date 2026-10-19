@@ -16,6 +16,7 @@ struct SensorConfig {
     std::string robotHost = "192.168.1.20";
     int robotPort = 6379;
     std::string calibFileName = "config/calib.json";
+    std::string pointCloudColor = "distance";  // Initial point cloud colouring: distance, rgb or segmentation
     std::string sourceFile;     // File the config was read from, empty when the defaults are used
 
     // The rig defaults (used when no config file is found)

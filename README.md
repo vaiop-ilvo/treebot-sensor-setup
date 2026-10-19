@@ -168,11 +168,13 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
     { "name": "cam4", "ip": "192.168.2.11", "rotation": "cw" }
   ],
   "robot":   { "host": "192.168.1.20", "port": 6379 },
-  "calibration": "config/calib.json"
+  "calibration": "config/calib.json",
+  "pointcloud_color": "rgb"
 }
 ```
 
 * `rotation`: `cw`, `ccw`, `180`, or leave it out for no rotation.
+* `pointcloud_color`: initial colouring of the point cloud, `distance` (default), `rgb` or `segmentation` (not implemented yet, falls back to `distance`). It can be changed in the lidar tile while the application runs (see [Point cloud colours](#point-cloud-colours)).
 * The file is searched in this order:
   1. the path given as first argument of `qt_example_full`
   2. `./config/sensors.json`
@@ -194,6 +196,8 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
+| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png` |
+| `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
 ## Using the application
 
@@ -234,7 +238,7 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
 * **Window layout:**
   * Header: the recording controls and the robot card (Redis connection, GNSS fix badge, lat/lon, speeds).
   * Middle: one tile per camera.
-  * Bottom: the lidar point cloud, coloured by height. You can drag the divider between the cameras and the lidar view.
+  * Bottom: the lidar point cloud, coloured by distance or by the camera colours (selector in the lidar tile header, see [Point cloud colours](#point-cloud-colours)). You can drag the divider between the cameras and the lidar view.
 * **⟳ button** (camera tile header): rotates that camera 90° clockwise. The rotation applies to the view and to the saved images; it is not written back to `sensors.json`, so set `rotation` there for a permanent change.
 * **Status dots:** 🟢 streaming, 🟠 connected but waiting for frames, 🔴 offline (hover the dot for the reason).
 * **Point cloud view:**
@@ -301,14 +305,36 @@ The sensors keep running in the background during a replay (only their display i
 | `robot_odom_lng_speed` | Redis key `plc.monitor.navigation.velocity.longitudinal` |
 | `robot_odom_ang_speed` | Redis key `plc.monitor.navigation.velocity.angular` |
 
+## Point cloud colours
+
+The selector in the header of the lidar tile chooses how the point cloud is coloured (the initial choice comes from `pointcloud_color` in `sensors.json`):
+
+| Mode | Colour |
+|---|---|
+| **Distance** | Turbo colormap on the distance to the lidar, 0 m (blue) to 15 m (red) |
+| **Camera RGB** | Colour of the camera pixel each point projects onto, using `config/calib.json`. Grey: not seen by any camera |
+| **Segmentation** | Not implemented yet (disabled) |
+
+Camera RGB (`CameraColorizer` in `src/Utils/PointCloudColor.cpp`):
+
+* Every point is transformed to each camera and projected with the camera matrix **and the lens distortion**. Points outside the field of view are skipped before projecting: beyond the field of view the distortion polynomial folds points back into the image.
+* **Occlusion:** the cameras sit 20–35 cm from the lidar and do not see exactly the same surfaces. A depth buffer per camera (4×4 px cells) keeps points that are hidden behind a nearer object in the camera view grey, instead of giving them the colour of that object.
+* A point seen by several cameras takes the colour of the camera that sees it closest to its image centre (least distortion).
+* **Live:** the cloud is coloured with the frames of its row (the frames closest to the lidar timestamp, at most 50 ms away), so it is shown once the camera frames are in. A camera rotated differently than during calibration (⟳ button) is not used, and a warning is printed.
+* **Replay:** the recorded images of the row are used; changing the mode while paused recolours the current row.
+
 ## Calibration file
 
 `config/calib.json` holds, per camera (`cam1`..`cam4`):
 
 * `intrinsics`: 3×3 camera matrix K
-* `extrinsics`: 4×4 lidar → camera transform
+* `extrinsics`: 4×4 lidar → camera transform (X_cam = T · X_lidar, OpenCV camera frame)
+* `distortion`: OpenCV distortion coefficients (k1, k2, p1, p2, k3)
+* `image_size`: [width, height] of the (rotated) image the calibration is valid for; other image sizes are not used for colouring
+* `rotation_deg`: camera rotation during calibration (degrees clockwise, as the ⟳ button shows it)
+* `quality`: reprojection errors of the calibration (information only)
 
-It is read by `loadCalib()` in `src/Utils/LidarCamera.cpp`. `projectLidarCamera()` uses it to colour lidar points with a camera image (points behind the camera or outside the image are grey). The main application does not use the projection yet.
+Only `intrinsics` and `extrinsics` are required. The file is generated by the calibration project [sensor-calibration-setup](https://gitlab.ilvo.be/vaiop/sensor-calibration-setup) (`treebot-calib export`). It is read by `loadCameraCalib()` in `src/Utils/LidarCamera.cpp`.
 
 ## Code structure
 
@@ -320,7 +346,8 @@ include/, src/
 ├── Robot/ArtofRobot      Robot state from Redis (with background polling); State.hpp = JSON → struct
 ├── Utils/AsyncWriter     Bounded worker pool that writes images and point clouds to disk
 ├── Utils/SensorConfig    Loads config/sensors.json
-├── Utils/LidarCamera     Calibration loading and lidar → camera projection
+├── Utils/LidarCamera     Calibration loading (config/calib.json)
+├── Utils/PointCloudColor Point cloud colour modes: distance, camera RGB (projection + occlusion test)
 ├── Utils/MetaData.hpp    Metadata structs for robot, lidar and cameras
 ├── Gui/                  MainWindow (main app), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
 │                         Recording (reads a recording folder back for the replay),

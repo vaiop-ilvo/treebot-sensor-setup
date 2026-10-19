@@ -19,6 +19,7 @@
 #include <Lidar/Ouster.h>
 #include <Camera/Daheng.h>
 #include <Robot/ArtofRobot.h>
+#include <Utils/PointCloudColor.h>
 #include <Utils/SensorConfig.h>
 
 class MainWindow : public QMainWindow {
@@ -36,6 +37,7 @@ private:
         bool record = false;
         OusterMetaData lidar;
         RobotMetaData robot;
+        std::shared_ptr<std::vector<vaiop::QtPoint>> pointCloud;  // Coloured with the camera frames when the row completes
     };
 
     SensorConfig config;
@@ -66,6 +68,12 @@ private:
 
     // While replaying, the sensors keep running in the background but are not shown
     bool replaying = false;
+    RecordedFrame lastReplayFrame;                // Shown again when the colour mode changes
+
+    // Point cloud colouring
+    ColorMode colorMode = ColorMode::Distance;
+    CameraColorizer colorizer;                    // Calibrations in the order of config.cameras
+    std::vector<bool> rotationWarned;             // A rotation mismatch is reported once per camera
 
     void setupUI();
     void connectSensors();
@@ -78,6 +86,10 @@ private:
     void startReplay();
     void stopReplay();
     void showRecordedFrame(const RecordedFrame& frame);
+    void setColorMode(ColorMode mode);
+    // Copy of the cloud coloured with the camera images (RGB, index = camera index, empty = no image)
+    std::shared_ptr<std::vector<vaiop::QtPoint>> colorWithCameras(const std::vector<vaiop::QtPoint>& cloud,
+                                                                  const std::vector<cv::Mat>& imagesRGB) const;
     void updateStatus();
     std::string recordPath(const QString& relative) const;
 };

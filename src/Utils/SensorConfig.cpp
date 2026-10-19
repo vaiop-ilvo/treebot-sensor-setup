@@ -96,6 +96,8 @@ SensorConfig SensorConfig::load(const std::string& path)
         config.calibFileName = resolveRelative(file, QString::fromStdString(config.calibFileName));
     }
 
+    config.pointCloudColor = root["pointcloud_color"].toString(QString::fromStdString(config.pointCloudColor)).toStdString();
+
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();
 

@@ -1,26 +1,11 @@
 #include <Lidar/Ouster.h>
 #include <Utils/AsyncWriter.h>
+#include <Utils/PointCloudColor.h>
 #include <QDebug>
 #include <QString>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
-
-namespace {
-    // Turbo colormap (polynomial approximation by Google), t in [0, 1]
-    QVector3D turbo(float t)
-    {
-        t = std::clamp(t, 0.0f, 1.0f);
-        const float r = 0.13572138f + t * (4.61539260f + t * (-42.66032258f + t * (132.13108234f + t * (-152.94239396f + t * 59.28637943f))));
-        const float g = 0.09140261f + t * (2.19418839f + t * (4.84296658f + t * (-14.18503333f + t * (4.27729857f + t * 2.82956604f))));
-        const float b = 0.10667330f + t * (12.64194608f + t * (-60.58204836f + t * (110.36276771f + t * (-89.90310912f + t * 27.34824973f))));
-        return QVector3D(std::clamp(r, 0.0f, 1.0f), std::clamp(g, 0.0f, 1.0f), std::clamp(b, 0.0f, 1.0f));
-    }
-
-    // Height range used for the colormap [m]
-    constexpr float COLOR_Z_MIN = -1.5f;
-    constexpr float COLOR_Z_MAX = 2.5f;
-}
 
 Ouster::Ouster(const std::string& ip) : ip(ip)
 {
@@ -150,10 +135,9 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> Ouster::getPointCloud()
         const float y = static_cast<float>(xyz.y());
         const float z = static_cast<float>(xyz.z());
 
-        // Populate Qt cloud, coloured by height
+        // Populate Qt cloud
         vaiop::QtPoint p;
         p.position = QVector3D(x, y, z);
-        p.color = turbo((z - COLOR_Z_MIN) / (COLOR_Z_MAX - COLOR_Z_MIN));
         qCloud->push_back(p);
 
         // Populate PCL cloud
@@ -165,6 +149,7 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> Ouster::getPointCloud()
     }
     eigenCloud.conservativeResize(nValid, 4);
     pclCloud = newPclCloud;
+    colorByDistance(*qCloud);
 
     return qCloud;
 }
@@ -258,8 +243,8 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> Ouster::loadPLY(const std::string& 
     for (const pcl::PointXYZ& point : cloud) {
         vaiop::QtPoint p;
         p.position = QVector3D(point.x, point.y, point.z);
-        p.color = turbo((point.z - COLOR_Z_MIN) / (COLOR_Z_MAX - COLOR_Z_MIN));
         qCloud->push_back(p);
     }
+    colorByDistance(*qCloud);
     return qCloud;
 }

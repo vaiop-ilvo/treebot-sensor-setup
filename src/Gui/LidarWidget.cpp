@@ -1,5 +1,6 @@
 #include <Gui/LidarWidget.h>
 #include <QStackedLayout>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
 
 LidarWidget::LidarWidget(QWidget* parent)
@@ -8,6 +9,19 @@ LidarWidget::LidarWidget(QWidget* parent)
     setObjectName("card");
 
     header = new SensorHeader("Lidar", this);
+
+    // Colour mode, in the order of ColorMode
+    colorBox = new QComboBox(this);
+    colorBox->addItem("Colour: distance", static_cast<int>(ColorMode::Distance));
+    colorBox->addItem("Colour: camera RGB", static_cast<int>(ColorMode::Rgb));
+    colorBox->addItem("Colour: segmentation", static_cast<int>(ColorMode::Segmentation));
+    colorBox->setItemData(0, "Turbo colormap on the distance to the lidar (0-15 m)", Qt::ToolTipRole);
+    colorBox->setItemData(1, "Colour of the camera pixels (needs config/calib.json); grey = not seen by a camera", Qt::ToolTipRole);
+    colorBox->setItemData(2, "Not implemented yet", Qt::ToolTipRole);
+    if (auto* model = qobject_cast<QStandardItemModel*>(colorBox->model())) {
+        model->item(2)->setEnabled(false);
+    }
+    header->addTool(colorBox);
     pointCloudWidget = new PointCloudWidget(this);
 
     // Message shown on top of the point cloud (offline / help text)
@@ -60,6 +74,23 @@ void LidarWidget::setOffline(const std::string& ip, const QString& reason) {
     header->setStats("offline");
     messageLabel->setText(reason);
     messageLabel->show();
+}
+
+ColorMode LidarWidget::colorMode() const {
+    return static_cast<ColorMode>(colorBox->currentData().toInt());
+}
+
+void LidarWidget::setColorMode(ColorMode mode) {
+    const int index = colorBox->findData(static_cast<int>(mode));
+    if (index >= 0) {
+        colorBox->setCurrentIndex(index);
+    }
+}
+
+void LidarWidget::onColorModeChanged(std::function<void(ColorMode)> callback) {
+    connect(colorBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, callback](int) {
+        callback(colorMode());
+    });
 }
 
 void LidarWidget::showMessage(const QString& text) {

@@ -6,89 +6,151 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
-std::shared_ptr<std::vector<vaiop::QtPoint>> projectLidarCamera(const Eigen::MatrixXd& pLidar, const cv::Mat& im, const Eigen::Matrix4d& tLidarCam, const Eigen::Matrix3d& K)
-{
-    auto qtCloud = std::make_shared<std::vector<vaiop::QtPoint>>();
-    qtCloud->reserve(pLidar.rows());
+#include <opencv2/core/eigen.hpp>
 
-    // Projection matrix for column vectors: p_pixel = Kh * T * p_lidar
-    Eigen::Matrix4d Kh = Eigen::Matrix4d::Identity();
-    Kh.block<3,3>(0,0) = K;
-    Eigen::Matrix4d Pt = Kh * tLidarCam;
-    // Points are stored as rows, so transpose: P_pixel = P_lidar * Pt^T
-    Eigen::MatrixXd pPixel = pLidar * Pt.transpose();
-
-    for (Eigen::Index i = 0; i < pPixel.rows(); ++i) {
-        vaiop::QtPoint p;
-        p.position = QVector3D(pLidar(i, 0), pLidar(i, 1), pLidar(i, 2));
-        p.color = QVector3D(0.5f, 0.5f, 0.5f);
-
-        // Only points in front of the camera can be projected
-        const double depth = pPixel(i, 2);
-        if (depth > 0.0) {
-            // Normalize with the scaling factor to get pixel (u,v)
-            const double u = pPixel(i, 0) / depth;
-            const double v = pPixel(i, 1) / depth;
-
-            if (u >= 0 && u < im.cols && v >= 0 && v < im.rows) {
-                cv::Vec3b color = im.at<cv::Vec3b>(static_cast<int>(v), static_cast<int>(u));
-                // BGR -> RGB in [0, 1]
-                p.color = QVector3D(color[2], color[1], color[0]) / 255.0f;
+namespace {
+    bool readMatrix(const QJsonArray& rows, Eigen::MatrixXd& matrix)
+    {
+        if (rows.size() != matrix.rows()) {
+            return false;
+        }
+        for (int i = 0; i < matrix.rows(); ++i) {
+            const QJsonArray row = rows[i].toArray();
+            if (row.size() != matrix.cols()) {
+                return false;
+            }
+            for (int j = 0; j < matrix.cols(); ++j) {
+                matrix(i, j) = row[j].toDouble();
             }
         }
-
-        qtCloud->push_back(p);
+        return true;
     }
 
-    return qtCloud;
+    // Largest radius on the normalised image plane up to which the radial distortion keeps increasing.
+    // Beyond it the polynomial folds back, so points far outside the field of view would land in the image.
+    double monotonicRadius(const cv::Mat& dist)
+    {
+        auto k = [&dist](int i) { return i < static_cast<int>(dist.total()) ? dist.at<double>(i) : 0.0; };
+        auto distorted = [&](double r) {
+            const double r2 = r * r;
+            const double num = 1.0 + r2 * (k(0) + r2 * (k(1) + r2 * k(4)));
+            const double den = 1.0 + r2 * (k(5) + r2 * (k(6) + r2 * k(7)));
+            return r * num / den;
+        };
+        constexpr double STEP = 0.002;
+        constexpr double MAX_RADIUS = 10.0;
+        double previous = 0.0;
+        for (double r = STEP; r < MAX_RADIUS; r += STEP) {
+            const double rd = distorted(r);
+            if (rd <= previous) {
+                return r - STEP;
+            }
+            previous = rd;
+        }
+        return MAX_RADIUS;
+    }
+
+    // Undistorted extent of the image border on the normalised image plane
+    void computeImageBounds(CameraCalib& calib)
+    {
+        const double rMax = monotonicRadius(calib.distCoeffs);
+        calib.maxRadius2 = rMax * rMax;
+        if (calib.imageSize.area() == 0) {
+            return;
+        }
+        const int w = calib.imageSize.width;
+        const int h = calib.imageSize.height;
+        std::vector<cv::Point2d> border;
+        for (int u = 0; u < w; u += 8) {
+            border.emplace_back(u, 0);
+            border.emplace_back(u, h - 1);
+        }
+        for (int v = 0; v < h; v += 8) {
+            border.emplace_back(0, v);
+            border.emplace_back(w - 1, v);
+        }
+        cv::Mat K;
+        cv::eigen2cv(calib.K, K);
+        // The default undistortPoints stops after 5 iterations, which does not converge in the corners of a wide lens
+        std::vector<cv::Point2d> normalised;
+        cv::undistortPoints(border, normalised, K, calib.distCoeffs, cv::noArray(), cv::noArray(),
+                            cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 200, 1e-10));
+
+        calib.xMin = calib.yMin = 1e9;
+        calib.xMax = calib.yMax = -1e9;
+        for (const cv::Point2d& p : normalised) {
+            calib.xMin = std::min(calib.xMin, std::max(p.x, -rMax));
+            calib.xMax = std::max(calib.xMax, std::min(p.x, rMax));
+            calib.yMin = std::min(calib.yMin, std::max(p.y, -rMax));
+            calib.yMax = std::max(calib.yMax, std::min(p.y, rMax));
+        }
+        // Small margin: the exact border is checked again after projection
+        const double mx = 0.02 * (calib.xMax - calib.xMin);
+        const double my = 0.02 * (calib.yMax - calib.yMin);
+        calib.xMin -= mx; calib.xMax += mx;
+        calib.yMin -= my; calib.yMax += my;
+    }
 }
 
-
-bool loadCalib(const std::string& calibFileName, const std::string& camName, Eigen::Matrix3d& K, Eigen::Matrix4d& tLidarCam)
+CameraCalib loadCameraCalib(const std::string& calibFileName, const std::string& camName)
 {
-    // Default
-    K = Eigen::Matrix3d::Identity();
-    tLidarCam = Eigen::Matrix4d::Identity();
-
+    CameraCalib calib;
+    calib.name = camName;
     if (calibFileName.empty()) {
-        return false;
+        return calib;
     }
 
     QFile file(QString::fromStdString(calibFileName));
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         qWarning() << "Could not open calibration file" << file.fileName();
-        return false;
+        return calib;
     }
 
     QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
     if (doc.isNull() || !doc.isObject()) {
         qWarning() << "Failed to parse calibration file" << file.fileName();
-        return false;
+        return calib;
     }
 
     const QJsonObject rootObj = doc.object();
     const QString cam = QString::fromStdString(camName);
-    const QJsonArray intrinsics = rootObj["intrinsics"].toObject()[cam].toArray();
-    const QJsonArray extrinsics = rootObj["extrinsics"].toObject()[cam].toArray();
-    if (intrinsics.size() != 3 || extrinsics.size() != 4) {
+
+    // Intrinsics and lidar to camera extrinsics are required
+    Eigen::MatrixXd K(3, 3), T(4, 4);
+    if (!readMatrix(rootObj["intrinsics"].toObject()[cam].toArray(), K)
+        || !readMatrix(rootObj["extrinsics"].toObject()[cam].toArray(), T)) {
         qWarning() << "No valid calibration for" << cam << "in" << file.fileName();
-        return false;
+        return calib;
     }
+    calib.K = K;
+    calib.tLidarCam = T;
 
-    // Parse intrinsics
-    for (int i = 0; i < 3; ++i) {
-        QJsonArray row = intrinsics[i].toArray();
-        for (int j = 0; j < 3; ++j) {
-            K(i, j) = row[j].toDouble();
+    // Optional: distortion, image size and rotation (older files only hold K and T)
+    const QJsonArray dist = rootObj["distortion"].toObject()[cam].toArray();
+    if (!dist.isEmpty()) {
+        calib.distCoeffs = cv::Mat(1, static_cast<int>(dist.size()), CV_64F);
+        for (int i = 0; i < dist.size(); ++i) {
+            calib.distCoeffs.at<double>(0, i) = dist[i].toDouble();
         }
     }
-
-    // Parse lidar to camera extrinsics
-    for (int i = 0; i < 4; ++i) {
-        QJsonArray row = extrinsics[i].toArray();
-        for (int j = 0; j < 4; ++j) {
-            tLidarCam(i, j) = row[j].toDouble();
-        }
+    const QJsonArray size = rootObj["image_size"].toObject()[cam].toArray();
+    if (size.size() == 2) {
+        calib.imageSize = cv::Size(size[0].toInt(), size[1].toInt());
     }
-    return true;
+    const QJsonValue rotation = rootObj["rotation_deg"].toObject()[cam];
+    if (rotation.isDouble()) {
+        calib.rotationDeg = rotation.toInt();
+    }
+
+    computeImageBounds(calib);
+    calib.valid = true;
+    return calib;
+}
+
+bool loadCalib(const std::string& calibFileName, const std::string& camName, Eigen::Matrix3d& K, Eigen::Matrix4d& tLidarCam)
+{
+    const CameraCalib calib = loadCameraCalib(calibFileName, camName);
+    K = calib.K;
+    tLidarCam = calib.tLidarCam;
+    return calib.valid;
 }

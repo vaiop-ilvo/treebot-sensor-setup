@@ -58,6 +58,7 @@ target_link_libraries(camera_example
 add_executable(lidar_example_reflectivity "lidar_example_reflectivity.cpp"
   "${SRC_DIR}/Lidar/Ouster.cpp"
   "${SRC_DIR}/Utils/AsyncWriter.cpp"
+  "${SRC_DIR}/Utils/PointCloudColor.cpp"
   "${SRC_DIR}/Utils/SensorConfig.cpp"
 )
 target_link_libraries(lidar_example_reflectivity
@@ -82,6 +83,7 @@ add_executable(qt_example_lidar "qt_example_lidar.cpp"
   "${SRC_DIR}/Gui/MainWindowLidar.cpp"
   "${SRC_DIR}/Lidar/Ouster.cpp"
   "${SRC_DIR}/Utils/AsyncWriter.cpp"
+  "${SRC_DIR}/Utils/PointCloudColor.cpp"
   "${SRC_DIR}/Utils/SensorConfig.cpp"
 )
 target_link_libraries(qt_example_lidar
@@ -158,5 +160,33 @@ add_executable(read_config "read_config.cpp"
 target_link_libraries(read_config
   ${Qt_LIBS}
   ${OpenCV_LIBS}
+  Eigen3::Eigen
+)
+
+add_executable(colorize_cloud "colorize_cloud.cpp"
+  "${SRC_DIR}/Utils/LidarCamera.cpp"
+  "${SRC_DIR}/Utils/PointCloudColor.cpp"
+)
+target_link_libraries(colorize_cloud
+  ${Qt_LIBS}
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  Eigen3::Eigen
+)
+
+add_executable(capture_snapshot "capture_snapshot.cpp"
+  "${SRC_DIR}/Camera/Daheng.cpp"
+  "${SRC_DIR}/Lidar/Ouster.cpp"
+  "${SRC_DIR}/Utils/AsyncWriter.cpp"
+  "${SRC_DIR}/Utils/PointCloudColor.cpp"
+  "${SRC_DIR}/Utils/LidarCamera.cpp"
+  "${SRC_DIR}/Utils/SensorConfig.cpp"
+)
+target_link_libraries(capture_snapshot
+  PRIVATE OusterSDK::ouster_sensor
+  ${DAHENG_LIBRARY}
+  ${OpenCV_LIBS}
+  ${Qt_LIBS}
+  ${PCL_LIBRARIES}
   Eigen3::Eigen
 )

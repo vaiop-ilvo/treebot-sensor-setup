@@ -62,6 +62,6 @@ public:
 
     // Queues the last point cloud to be written to disk. Returns false when there is no cloud or the write queue is full.
     bool savePLY(const std::string& filename) const;
-    // Reads a point cloud written by savePLY, coloured like getPointCloud. Returns nullptr when the file cannot be read.
+    // Reads a point cloud written by savePLY, coloured by distance like getPointCloud. Returns nullptr when the file cannot be read.
     static std::shared_ptr<std::vector<vaiop::QtPoint>> loadPLY(const std::string& filename);
 };

@@ -1,9 +1,14 @@
 #pragma once
 
+#include <QComboBox>
 #include <QFrame>
 #include <QLabel>
+
+#include <functional>
+
 #include <Gui/PointCloudWidget.h>
 #include <Gui/SensorHeader.h>
+#include <Utils/PointCloudColor.h>
 
 class LidarWidget : public QFrame {
 
@@ -16,8 +21,15 @@ public:
     // Removes the point cloud and shows the text instead
     void showMessage(const QString& text);
 
+    // Colour mode selector in the header
+    ColorMode colorMode() const;
+    void setColorMode(ColorMode mode);
+    // Called when the user picks another colour mode
+    void onColorModeChanged(std::function<void(ColorMode)> callback);
+
 private:
     SensorHeader* header;
     PointCloudWidget* pointCloudWidget;
     QLabel* messageLabel;
+    QComboBox* colorBox;
 };

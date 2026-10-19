@@ -35,6 +35,20 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
     : QMainWindow(parent),
       config(config)
 {
+    // Calibrations for colouring the point cloud with the cameras
+    std::vector<CameraCalib> calibs;
+    for (const CameraInfo& camInfo : config.cameras) {
+        calibs.push_back(loadCameraCalib(camInfo.calibFileName, camInfo.name));
+    }
+    colorizer = CameraColorizer(std::move(calibs));
+    rotationWarned.assign(config.cameras.size(), false);
+
+    colorMode = colorModeFromString(config.pointCloudColor);
+    if (colorMode == ColorMode::Segmentation) {
+        qWarning() << "Point cloud colouring by segmentation is not implemented yet, colouring by distance";
+        colorMode = ColorMode::Distance;
+    }
+
     setupUI();
 
     // Connect the sensors after the window is shown, so the user sees the progress
@@ -94,6 +108,8 @@ void MainWindow::setupUI()
 
     // Lidar
     lidarWidget = new LidarWidget(central);
+    lidarWidget->setColorMode(colorMode);
+    lidarWidget->onColorModeChanged([this](ColorMode mode) { setColorMode(mode); });
 
     // Cameras and lidar share the space; the user can drag the divider
     auto* splitter = new QSplitter(Qt::Vertical, central);
@@ -111,9 +127,11 @@ void MainWindow::setupUI()
     // Status bar
     triggerStatus = new QLabel(this);
     writerStatus = new QLabel(this);
-    configStatus = new QLabel(config.sourceFile.empty()
-        ? QString("config: built-in defaults")
-        : QString("config: %1").arg(QString::fromStdString(config.sourceFile)), this);
+    configStatus = new QLabel(QString("%1 · calibration: %2/%3 cameras")
+        .arg(config.sourceFile.empty() ? QString("config: built-in defaults") : QString("config: %1").arg(QString::fromStdString(config.sourceFile)))
+        .arg(colorizer.validCount())
+        .arg(config.cameras.size()), this);
+    configStatus->setToolTip(QString::fromStdString(config.calibFileName));
     statusBar()->addWidget(triggerStatus);
     statusBar()->addWidget(writerStatus);
     statusBar()->addPermanentWidget(configStatus);
@@ -252,14 +270,48 @@ void MainWindow::stopReplay()
     triggerStatus->setText(liveTriggerText.isEmpty() ? "Connecting to the sensors…" : liveTriggerText);
 }
 
+void MainWindow::setColorMode(ColorMode mode)
+{
+    colorMode = mode;
+    if (mode == ColorMode::Rgb && colorizer.validCount() == 0) {
+        statusBar()->showMessage(QString("No camera calibration in %1: the point cloud stays grey")
+            .arg(QString::fromStdString(config.calibFileName)), 8000);
+    }
+    // Live rows pick up the new mode with the next scan; a replay shows the current row again
+    if (replaying && lastReplayFrame.pointCloud) {
+        showRecordedFrame(lastReplayFrame);
+    }
+}
+
+std::shared_ptr<std::vector<vaiop::QtPoint>> MainWindow::colorWithCameras(const std::vector<vaiop::QtPoint>& cloud,
+                                                                          const std::vector<cv::Mat>& imagesRGB) const
+{
+    auto colored = std::make_shared<std::vector<vaiop::QtPoint>>(cloud);
+    colorizer.colorize(*colored, imagesRGB);
+    return colored;
+}
+
 void MainWindow::showRecordedFrame(const RecordedFrame& frame)
 {
     if (!replaying) {
         return;
     }
+    lastReplayFrame = frame;
 
     if (frame.pointCloud) {
-        lidarWidget->setPointCloud(frame.pointCloud);
+        if (colorMode == ColorMode::Rgb) {
+            std::vector<cv::Mat> imagesRGB(frame.images.size());
+            for (size_t i = 0; i < frame.images.size(); ++i) {
+                if (!frame.images[i].isNull()) {
+                    const QImage rgb = frame.images[i].convertToFormat(QImage::Format_RGB888);
+                    imagesRGB[i] = cv::Mat(rgb.height(), rgb.width(), CV_8UC3, const_cast<uchar*>(rgb.constBits()),
+                                           static_cast<size_t>(rgb.bytesPerLine())).clone();
+                }
+            }
+            lidarWidget->setPointCloud(colorWithCameras(*frame.pointCloud, imagesRGB));
+        } else {
+            lidarWidget->setPointCloud(frame.pointCloud);
+        }
         lidarWidget->setInfo(frame.lidar.ip, frame.lidar.fps, frame.lidar.frameId, frame.pointCloud->size(), Theme::Status::Ok);
     } else {
         lidarWidget->showMessage(frame.lidar.pcPath.empty() ? "No point cloud in this row" : QString("Cannot read %1").arg(QString::fromStdString(frame.lidar.pcPath)));
@@ -324,7 +376,11 @@ void MainWindow::startCapture()
         auto pc = lidarPtr->getPointCloud();
         lidarPtr->getMetaData(capture.lidar);
         if (pc != nullptr) {
-            lidarWidget->setPointCloud(pc);
+            // RGB: shown when the camera frames of the row are in (finishCapture)
+            capture.pointCloud = pc;
+            if (colorMode != ColorMode::Rgb) {
+                lidarWidget->setPointCloud(pc);
+            }
             lidarWidget->setInfo(lidarPtr->getIp(), lidarPtr->getFps(), lidarPtr->getFrameId(), pc->size(), Theme::Status::Ok);
             if (capture.record) {
                 const QString relativeFileName = QString("lidar/%1.ply").arg(capture.fileIndex, 6, 10, QChar('0'));
@@ -368,6 +424,7 @@ void MainWindow::finishCapture(const PendingCapture& capture)
 {
     const bool record = capture.record && recordWidget->isRecording();
     std::vector<CameraMetaData> cameraMetaData(cameras.size());
+    std::vector<cv::Mat> imagesRGB(cameras.size());
 
     for (size_t i = 0; i < cameras.size(); i++) {
         auto& camPtr = cameras[i];
@@ -378,6 +435,19 @@ void MainWindow::finishCapture(const PendingCapture& capture)
         Daheng::Frame frame;
         const bool found = camPtr->isAcquiring() && camPtr->getFrameNear(capture.triggerTs, frame);
         const uint64_t offset = found ? static_cast<uint64_t>(std::llabs(static_cast<int64_t>(frame.ts - capture.triggerTs))) : 0;
+
+        // Colour the point cloud with every frame close to the trigger (also one already logged in the previous row),
+        // as long as the camera is rotated as during the calibration
+        if (found && offset <= MAX_SYNC_OFFSET_US && i < colorizer.calibs().size()) {
+            const int calibRotation = colorizer.calibs()[i].rotationDeg;
+            if (calibRotation < 0 || calibRotation == camPtr->getRotation()) {
+                imagesRGB[i] = frame.image;
+            } else if (!rotationWarned[i]) {
+                rotationWarned[i] = true;
+                qWarning().noquote() << QString("%1 is rotated %2°, but calibrated at %3°: not used to colour the point cloud")
+                    .arg(QString::fromStdString(camPtr->getName())).arg(camPtr->getRotation()).arg(calibRotation);
+            }
+        }
         if (!found || offset > MAX_SYNC_OFFSET_US || frame.sequence <= lastCameraSequence[i]) {
             if (camPtr->isOpen()) {
                 cameraWidgets[i]->setInfo(camPtr->getIp(), camPtr->getFps(), camPtr->getFrameId(), Theme::Status::Waiting);
@@ -398,6 +468,10 @@ void MainWindow::finishCapture(const PendingCapture& capture)
                 camMetaData.imPath = relativeFileName.toStdString();
             }
         }
+    }
+
+    if (capture.pointCloud && colorMode == ColorMode::Rgb) {
+        lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
     }
 
     if (record) {
