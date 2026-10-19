@@ -78,14 +78,16 @@ SegmentationWorker::Result SegmentationWorker::process(const Job& job)
 {
     const auto tic = std::chrono::steady_clock::now();
 
+    Result result;
     std::vector<cv::Mat> labelMaps(job.imagesRGB.size());
+    result.overlays.resize(job.imagesRGB.size());
     for (size_t c = 0; c < job.imagesRGB.size(); ++c) {
         if (!job.imagesRGB[c].empty()) {
             labelMaps[c] = segmenter.segment(job.imagesRGB[c]);
+            result.overlays[c] = Segmenter::overlay(job.imagesRGB[c], labelMaps[c], segmenter.palette());
         }
     }
 
-    Result result;
     result.tag = job.tag;
     result.cloud = std::make_shared<std::vector<vaiop::QtPoint>>(*job.cloud);
     colorizer.colorizeLabels(*result.cloud, labelMaps, segmenter.palette(), &result.labels);

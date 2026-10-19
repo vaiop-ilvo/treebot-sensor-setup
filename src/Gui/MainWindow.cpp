@@ -123,6 +123,12 @@ void MainWindow::setupUI()
         lidarWidget->setLegend({}, "Segmenting…");
     }
     lidarWidget->onColorModeChanged([this](ColorMode mode) { setColorMode(mode); });
+    lidarWidget->onImageOverlayChanged([this](bool) {
+        // Live: the next scan shows the change; a replay shows the current row again
+        if (replaying && lastReplayFrame.pointCloud) {
+            showRecordedFrame(lastReplayFrame);
+        }
+    });
 
     // Cameras and lidar share the space; the user can drag the divider
     auto* splitter = new QSplitter(Qt::Vertical, central);
@@ -316,6 +322,11 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> MainWindow::colorWithCameras(const 
     return colored;
 }
 
+bool MainWindow::showingOverlay() const
+{
+    return colorMode == ColorMode::Segmentation && segmentation->isAvailable() && lidarWidget->imageOverlay();
+}
+
 void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
 {
     // Outdated: another colour mode, or switched between live and replay since the job was submitted
@@ -323,6 +334,15 @@ void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
         return;
     }
     lidarWidget->setPointCloud(result.cloud);
+    if (showingOverlay()) {
+        for (size_t i = 0; i < result.overlays.size() && i < cameraWidgets.size(); ++i) {
+            const cv::Mat& overlay = result.overlays[i];
+            if (!overlay.empty()) {
+                cameraWidgets[i]->setImage(QImage(overlay.data, overlay.cols, overlay.rows, static_cast<qsizetype>(overlay.step),
+                                                  QImage::Format_RGB888).copy());
+            }
+        }
+    }
 
     // Legend: the classes with at least 1% of the labelled points, largest first
     constexpr double MIN_SHARE = 0.01;
@@ -391,7 +411,9 @@ void MainWindow::showRecordedFrame(const RecordedFrame& frame)
         }
         const CameraMetaData& camMetaData = frame.cameras[i];
         if (!frame.images[i].isNull()) {
-            cameraWidgets[i]->setImage(frame.images[i]);
+            if (!(showingOverlay() && frame.pointCloud)) {
+                cameraWidgets[i]->setImage(frame.images[i]);
+            }
             cameraWidgets[i]->setInfo(camMetaData.ip, camMetaData.fps, camMetaData.frameId, Theme::Status::Ok);
         } else {
             cameraWidgets[i]->showMessage(camMetaData.imPath.empty() ? "No image in this row" : QString("Cannot read %1").arg(QString::fromStdString(camMetaData.imPath)));
@@ -521,8 +543,11 @@ void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
         }
         lastCameraSequence[i] = frame.sequence;
 
-        const QImage view(frame.image.data, frame.image.cols, frame.image.rows, static_cast<qsizetype>(frame.image.step), QImage::Format_RGB888);
-        cameraWidgets[i]->setImage(view.copy());
+        // With the image overlay the tile shows the segmented frame when the worker is done (showSegmentation)
+        if (!(showingOverlay() && capture.pointCloud)) {
+            const QImage view(frame.image.data, frame.image.cols, frame.image.rows, static_cast<qsizetype>(frame.image.step), QImage::Format_RGB888);
+            cameraWidgets[i]->setImage(view.copy());
+        }
         cameraWidgets[i]->setInfo(camPtr->getIp(), camPtr->getFps(), frame.frameId, Theme::Status::Ok);
 
         camPtr->getMetaData(frame, camMetaData);

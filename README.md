@@ -218,7 +218,7 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
-| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode |
+| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the bird's-eye view |
 | `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found) |
 | `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
@@ -353,6 +353,15 @@ Segmentation (`Segmenter`, `SegmentationWorker` in `src/Utils/`):
 * The model runs on a **background thread**, so the GUI never waits for it. B0 takes ~55 ms per image on the CPU (i7-13800H), so a scan with 4 cameras is coloured in ~0.25 s: the view updates ~4 times per second. A job that comes in while the model is busy replaces the waiting one, so the view always shows a recent scan.
 * The legend under the point cloud shows the classes with at least 1% of the labelled points, and the time per scan.
 * Class colours: fixed colours for the common outdoor classes (sky light blue, tree dark green, plant green, grass light green, earth brown, person red, …), generated colours for the others.
+* **Image overlay** (check box in the lidar tile, segmentation mode): the camera tiles show the segmented frames with the class colours on top, instead of the live frames. They come from the same scan as the point cloud, so they update at the segmentation rate (~4 Hz).
+
+### Bird's-eye view
+
+The **Bird's-eye view** check box in the lidar tile shows the point cloud from above, projected on the ground (`GroundPlane` in `src/Utils/`, `BirdEyeWidget` in `src/Gui/`). It works with every colour mode; with segmentation it gives a 2D map of the classes around the robot.
+
+* **Ground plane**, fitted in every scan (~1 ms): RANSAC over planes through 3 points within 1–25 m, keeping the plane with the most points within 8 cm. Only near-horizontal planes (normal within 35° of the lidar z axis) at least 20 cm below the lidar count, so walls and the ceiling are never chosen. The plane is refined by least squares and smoothed over time. On the rig the lidar is mounted ~1.0 m above the floor and tilted ~16°.
+* **Projection:** every point gets its position on the ground plane (forward = lidar x projected on the plane, shown up) and its height above it. Where points overlap from above, the highest is drawn, so objects cover the ground below them. The ground (up to 15 cm) is drawn dimmer, and points more than 4 m above the ground (e.g. a hall ceiling) are left out.
+* The view shows rings around the lidar (spacing adapts to the zoom), the lidar as a green triangle and the fitted plane (lidar height, tilt). Scroll to zoom, drag to pan, double-click to reset.
 
 ## Calibration file
 
@@ -381,10 +390,11 @@ include/, src/
 ├── Utils/PointCloudColor Point cloud colour modes: distance, camera RGB / class maps (projection + occlusion test)
 ├── Utils/Segmenter       Semantic segmentation of an image with an ONNX model (ONNX Runtime)
 ├── Utils/SegmentationWorker Background thread: segments the camera images and colours the point cloud by class
+├── Utils/GroundPlane     Ground plane fit (RANSAC) and projection of the cloud on it (bird's-eye view)
 ├── Utils/MetaData.hpp    Metadata structs for robot, lidar and cameras
 ├── Gui/                  MainWindow (main app), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
 │                         Recording (reads a recording folder back for the replay),
-│                         SensorHeader, PointCloudWidget (OpenGL 3.3), small example windows
+│                         SensorHeader, PointCloudWidget (OpenGL 3.3), BirdEyeWidget, small example windows
 └── Test/                 The example executables (see table above)
 config/                   sensors.json (addresses), calib.json (intrinsics / extrinsics)
 img/                      Images used in this README

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QLabel>
@@ -7,6 +8,7 @@
 #include <functional>
 #include <vector>
 
+#include <Gui/BirdEyeWidget.h>
 #include <Gui/PointCloudWidget.h>
 #include <Gui/SensorHeader.h>
 #include <Utils/PointCloudColor.h>
@@ -39,9 +41,23 @@ public:
     void setLegend(const std::vector<LegendEntry>& entries, const QString& note = {});
     void clearLegend();
 
+    // "Image overlay" check box (segmentation mode only): show the classes on the camera images
+    bool imageOverlay() const;
+    void onImageOverlayChanged(std::function<void(bool)> callback);
+
 private:
     SensorHeader* header;
     PointCloudWidget* pointCloudWidget;
+    BirdEyeWidget* birdEyeWidget;
+    QCheckBox* birdEyeBox;      // 3D view or bird's-eye view on the ground plane
+    QCheckBox* overlayBox;
+    QLabel* hintLabel;
+
+    std::shared_ptr<std::vector<vaiop::QtPoint>> lastCloud;   // Shown again when the view is switched
+    GroundPlane groundPlane;                                    // Previous fit, for temporal smoothing
+
+    void showCloud();
+    void updateViewControls();
     QLabel* messageLabel;
     QComboBox* colorBox;
     QLabel* legendLabel;

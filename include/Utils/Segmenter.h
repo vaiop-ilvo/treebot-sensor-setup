@@ -31,6 +31,9 @@ public:
     // Returns an empty Mat when the model is not available or the image is not RGB (CV_8UC3).
     cv::Mat segment(const cv::Mat& imageRGB);
 
+    // The image with the class colours blended on top (alpha = weight of the class colour); UNKNOWN pixels unchanged
+    static cv::Mat overlay(const cv::Mat& imageRGB, const cv::Mat& labels, const std::vector<cv::Vec3b>& palette, float alpha = 0.55f);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

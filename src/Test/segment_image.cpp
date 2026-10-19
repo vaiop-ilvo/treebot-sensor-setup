@@ -57,18 +57,14 @@ int main(int argc, char* argv[])
         const cv::Mat labels = segmenter.segment(rgb);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tic).count();
 
-        // Class colours blended over the image
-        cv::Mat colors(rgb.size(), CV_8UC3);
+        // Class colours blended over the image, as the image overlay of the application
         std::vector<int> counts(256, 0);
         for (int y = 0; y < labels.rows; ++y) {
             for (int x = 0; x < labels.cols; ++x) {
-                const uint8_t label = labels.at<uint8_t>(y, x);
-                counts[label]++;
-                colors.at<cv::Vec3b>(y, x) = label < palette.size() ? palette[label] : cv::Vec3b(0, 0, 0);
+                counts[labels.at<uint8_t>(y, x)]++;
             }
         }
-        cv::Mat blended;
-        cv::addWeighted(rgb, 0.4, colors, 0.6, 0.0, blended);
+        cv::Mat blended = Segmenter::overlay(rgb, labels, palette);
         cv::cvtColor(blended, blended, cv::COLOR_RGB2BGR);
         const std::filesystem::path out = outDir / (std::filesystem::path(path).stem().string() + "_seg.png");
         cv::imwrite(out.string(), blended);

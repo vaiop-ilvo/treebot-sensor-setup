@@ -30,6 +30,7 @@ public:
         std::shared_ptr<std::vector<vaiop::QtPoint>> cloud;    // Copy of the job cloud, coloured by class
         std::vector<uint8_t> labels;                           // Class per point, CameraColorizer::UNSEEN_LABEL when not seen
         std::vector<size_t> classPoints;                       // Number of points per class
+        std::vector<cv::Mat> overlays;                         // Camera images (RGB) with the classes on top; empty = no image
         double ms = 0.0;                                       // Time for segmenting and colouring
     };
 

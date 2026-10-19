@@ -232,3 +232,27 @@ cv::Mat Segmenter::segment(const cv::Mat& imageRGB)
     return {};
 #endif
 }
+
+cv::Mat Segmenter::overlay(const cv::Mat& imageRGB, const cv::Mat& labels, const std::vector<cv::Vec3b>& palette, float alpha)
+{
+    if (imageRGB.empty() || labels.size() != imageRGB.size() || labels.type() != CV_8U) {
+        return imageRGB.clone();
+    }
+    // Class colour per label value; UNKNOWN (and labels outside the palette) keep the image colour (weight 0)
+    cv::Mat lut(1, 256, CV_8UC3, cv::Scalar(0, 0, 0));
+    cv::Mat weight(1, 256, CV_8U, cv::Scalar(0));
+    for (size_t k = 0; k < palette.size() && k < UNKNOWN; ++k) {
+        lut.at<cv::Vec3b>(0, static_cast<int>(k)) = palette[k];
+        weight.at<uint8_t>(0, static_cast<int>(k)) = 255;
+    }
+    cv::Mat labels3, colors, mask;
+    cv::cvtColor(labels, labels3, cv::COLOR_GRAY2RGB);
+    cv::LUT(labels3, lut, colors);
+    cv::LUT(labels, weight, mask);
+
+    cv::Mat blended;
+    cv::addWeighted(imageRGB, 1.0 - alpha, colors, alpha, 0.0, blended);
+    cv::Mat result = imageRGB.clone();
+    blended.copyTo(result, mask);
+    return result;
+}

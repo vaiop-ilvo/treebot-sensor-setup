@@ -20,7 +20,21 @@ LidarWidget::LidarWidget(QWidget* parent)
     colorBox->setItemData(1, "Colour of the camera pixels (needs config/calib.json); grey = not seen by a camera", Qt::ToolTipRole);
     setSegmentationAvailable(false, "No segmentation model configured");
     header->addTool(colorBox);
+
+    overlayBox = new QCheckBox("Image overlay", this);
+    overlayBox->setToolTip("Show the segmentation classes on the camera images (segmentation mode)");
+    header->addTool(overlayBox);
+    birdEyeBox = new QCheckBox("Bird's-eye view", this);
+    birdEyeBox->setToolTip("Project the point cloud on the ground plane (detected in every scan) and show it from above");
+    header->addTool(birdEyeBox);
+    connect(birdEyeBox, &QCheckBox::toggled, this, [this](bool) {
+        updateViewControls();
+        showCloud();
+    });
+    connect(colorBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { updateViewControls(); });
+
     pointCloudWidget = new PointCloudWidget(this);
+    birdEyeWidget = new BirdEyeWidget(this);
 
     // Message shown on top of the point cloud (offline / help text)
     messageLabel = new QLabel(this);
@@ -41,18 +55,19 @@ LidarWidget::LidarWidget(QWidget* parent)
         .arg(Theme::viewportText.name(), Theme::viewport.name()));
     legendLabel->hide();
 
-    auto* hint = new QLabel("drag: rotate · right-drag: pan · scroll: zoom · double-click: reset", this);
-    hint->setObjectName("muted");
-    hint->setAlignment(Qt::AlignRight);
-    QFont hintFont = hint->font();
+    hintLabel = new QLabel(this);
+    hintLabel->setObjectName("muted");
+    hintLabel->setAlignment(Qt::AlignRight);
+    QFont hintFont = hintLabel->font();
     hintFont.setPointSize(8);
-    hint->setFont(hintFont);
+    hintLabel->setFont(hintFont);
 
     auto* viewContainer = new QWidget(this);
     auto* stacked = new QStackedLayout(viewContainer);
     stacked->setStackingMode(QStackedLayout::StackAll);
     stacked->addWidget(messageLabel);
     stacked->addWidget(pointCloudWidget);
+    stacked->addWidget(birdEyeWidget);
     messageLabel->raise();
 
     auto* layout = new QVBoxLayout(this);
@@ -63,13 +78,47 @@ LidarWidget::LidarWidget(QWidget* parent)
     auto* footer = new QHBoxLayout();
     footer->setSpacing(12);
     footer->addWidget(legendLabel, 1);
-    footer->addWidget(hint, 0, Qt::AlignRight | Qt::AlignBottom);
+    footer->addWidget(hintLabel, 0, Qt::AlignRight | Qt::AlignBottom);
     layout->addLayout(footer);
+
+    updateViewControls();
 }
 
 void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc) {
     messageLabel->hide();
-    pointCloudWidget->setPointCloud(pc);
+    lastCloud = std::move(pc);
+    showCloud();
+}
+
+void LidarWidget::showCloud() {
+    if (!birdEyeBox->isChecked()) {
+        pointCloudWidget->setPointCloud(lastCloud ? lastCloud : std::make_shared<std::vector<vaiop::QtPoint>>());
+        return;
+    }
+    if (!lastCloud || lastCloud->empty()) {
+        birdEyeWidget->clear();
+        return;
+    }
+    // ~1 ms for the plane fit and the projection
+    groundPlane = fitGroundPlane(*lastCloud, &groundPlane);
+    birdEyeWidget->setPoints(projectToGround(*lastCloud, groundPlane), groundPlane);
+}
+
+void LidarWidget::updateViewControls() {
+    const bool birdEye = birdEyeBox->isChecked();
+    pointCloudWidget->setVisible(!birdEye);
+    birdEyeWidget->setVisible(birdEye);
+    hintLabel->setText(birdEye ? "drag: pan · scroll: zoom · double-click: reset"
+                               : "drag: rotate · right-drag: pan · scroll: zoom · double-click: reset");
+    overlayBox->setEnabled(colorMode() == ColorMode::Segmentation);
+}
+
+bool LidarWidget::imageOverlay() const {
+    return overlayBox->isChecked() && overlayBox->isEnabled();
+}
+
+void LidarWidget::onImageOverlayChanged(std::function<void(bool)> callback) {
+    connect(overlayBox, &QCheckBox::toggled, this, [this, callback](bool) { callback(imageOverlay()); });
 }
 
 void LidarWidget::setInfo(const std::string& ip, double fps, uint64_t frameId, size_t nPoints, Theme::Status status) {
@@ -107,7 +156,9 @@ void LidarWidget::onColorModeChanged(std::function<void(ColorMode)> callback) {
 }
 
 void LidarWidget::showMessage(const QString& text) {
+    lastCloud.reset();
     pointCloudWidget->setPointCloud(std::make_shared<std::vector<vaiop::QtPoint>>());
+    birdEyeWidget->clear();
     messageLabel->setText(text);
     messageLabel->show();
 }

@@ -79,8 +79,10 @@ target_link_libraries(qt_example_pointcloud
 add_executable(qt_example_lidar "qt_example_lidar.cpp"
   ${widgetFiles}
   "${SRC_DIR}/Gui/PointCloudWidget.cpp"
+  "${SRC_DIR}/Gui/BirdEyeWidget.cpp"
   "${SRC_DIR}/Gui/LidarWidget.cpp"
   "${SRC_DIR}/Gui/MainWindowLidar.cpp"
+  "${SRC_DIR}/Utils/GroundPlane.cpp"
   "${SRC_DIR}/Lidar/Ouster.cpp"
   "${SRC_DIR}/Utils/AsyncWriter.cpp"
   "${SRC_DIR}/Utils/PointCloudColor.cpp"
@@ -165,6 +167,7 @@ target_link_libraries(read_config
 )
 
 add_executable(colorize_cloud "colorize_cloud.cpp"
+  "${SRC_DIR}/Utils/GroundPlane.cpp"
   "${SRC_DIR}/Utils/LidarCamera.cpp"
   "${SRC_DIR}/Utils/PointCloudColor.cpp"
   "${SRC_DIR}/Utils/Segmenter.cpp"

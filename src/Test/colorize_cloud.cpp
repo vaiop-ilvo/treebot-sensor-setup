@@ -1,7 +1,9 @@
 // Colours a recorded point cloud with recorded camera images, as the main application does in RGB mode,
 // or with the class colours of a segmentation model (segmentation mode) when --model is given.
-// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>]
-// The output is a binary PLY with x, y, z, red, green, blue.
+// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>]
+// The output is a binary PLY with x, y, z, red, green, blue. --bev also fits the ground plane and writes the
+// coloured cloud projected on it (bird's-eye view, forward up, rings every 5 m).
+#include <Utils/GroundPlane.h>
 #include <Utils/LidarCamera.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Segmenter.h>
@@ -19,7 +21,7 @@
 int main(int argc, char* argv[])
 {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>]\n";
+        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>]\n";
         return 1;
     }
     const std::string calibFile = argv[1];
@@ -38,10 +40,15 @@ int main(int argc, char* argv[])
     std::vector<CameraCalib> calibs;
     std::vector<cv::Mat> imagesRGB;
     SegmentationConfig segConfig;
+    std::string bevFile;
     for (int i = 4; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) {
             segConfig.modelDir = argv[++i];
+            continue;
+        }
+        if (arg == "--bev" && i + 1 < argc) {
+            bevFile = argv[++i];
             continue;
         }
         const size_t eq = arg.find('=');
@@ -97,6 +104,28 @@ int main(int argc, char* argv[])
     }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tic).count();
     std::cout << nColored << " of " << cloud.size() << " points coloured by " << imagesRGB.size() << " camera(s) in " << ms << " ms\n";
+
+    if (!bevFile.empty()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const GroundPlane plane = fitGroundPlane(cloud);
+        const double fitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!plane.valid) {
+            std::cerr << "No ground plane found\n";
+            return 1;
+        }
+        std::cout << "Ground: normal (" << plane.normal.transpose() << "), lidar " << plane.sensorHeight() << " m above the ground, tilt "
+                  << plane.tiltDeg() << " deg, " << plane.inliers << " inliers, " << fitMs << " ms\n";
+        BirdEyeView view;
+        view.size = cv::Size(900, 900);
+        view.metersPerPixel = 0.035f;
+        cv::Mat bev = renderBirdEye(projectToGround(cloud, plane), view, cv::Vec3b(17, 20, 25));
+        for (int r = 5; r <= 30; r += 5) {
+            cv::circle(bev, view.toPixel(0, 0), static_cast<int>(r / view.metersPerPixel), cv::Scalar(70, 75, 80), 1, cv::LINE_AA);
+        }
+        cv::circle(bev, view.toPixel(0, 0), 5, cv::Scalar(255, 255, 255), -1, cv::LINE_AA);
+        cv::cvtColor(bev, bev, cv::COLOR_RGB2BGR);
+        cv::imwrite(bevFile, bev);
+    }
 
     pcl::PointCloud<pcl::PointXYZRGB> output;
     output.reserve(cloud.size());

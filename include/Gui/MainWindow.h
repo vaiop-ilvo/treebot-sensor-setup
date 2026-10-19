@@ -95,6 +95,8 @@ private:
                                                                   const std::vector<cv::Mat>& imagesRGB) const;
     // Shows a point cloud coloured by the segmentation worker (GUI thread)
     void showSegmentation(const SegmentationWorker::Result& result);
+    // The camera tiles show the segmentation overlays of the worker instead of the camera frames
+    bool showingOverlay() const;
     void updateStatus();
     std::string recordPath(const QString& relative) const;
 
