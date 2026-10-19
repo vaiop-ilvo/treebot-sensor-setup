@@ -10,6 +10,8 @@ A Qt5 desktop application that records synchronised data from the VAIOP treebot 
 
 The GUI shows the live camera images and the point cloud, and when recording it writes images, point clouds and a CSV log with timestamps and robot metadata.
 
+With the lidar–camera calibration (`config/calib.json`) the point cloud can be coloured by distance, by the **camera colours** or by the classes of a **segmentation model** run on the camera images. On top of that the lidar tile offers a **bird's-eye view** on the detected ground plane, a **blob view** that groups segmented points into objects and filters them on size, and an **overlay** of the segmentation on the camera images. See [Point cloud colours](#point-cloud-colours) and [Lidar views](#lidar-views).
+
 ![The four camera views of the rig (virtual vineyard)](img/virtual-vineyard-image.png)
 
 *The four camera views of the rig, here in a virtual vineyard.*
@@ -25,6 +27,9 @@ QTimer (every 5 ms, GUI thread, never blocks)
  └─ oldest pending row complete?  (every camera has a frame at/after the trigger, or 150 ms passed)
       each camera: frame closest to the trigger -> CameraWidget (+ queue camN/<index>.png when recording)
       RecordWidget::logData()  (one CSV row)
+      colour mode RGB:          colour the point cloud with these frames -> LidarWidget
+      colour mode segmentation: hand cloud + frames to SegmentationWorker (background thread)
+                                  -> segment the images, colour the cloud by class -> LidarWidget (+ camera overlays)
 ```
 
 * The **lidar scan is the trigger**: every new scan collects, for each camera, the frame whose timestamp is closest to the lidar timestamp, plus the latest robot state into one CSV row. Without a lidar the rows are triggered at 10 Hz.
@@ -33,6 +38,7 @@ QTimer (every 5 ms, GUI thread, never blocks)
 * Each camera runs its own acquisition thread (`Daheng::acquisitionLoop`), which keeps its last 8 frames (with timestamps) in memory.
 * The robot state is read from Redis in a background thread (10 Hz, 300 ms timeout), so a missing robot never blocks or crashes the GUI.
 * At start-up `resetTimestamp()` is called back-to-back on the lidar and all cameras. This maps each sensor clock onto host time (µs since epoch), so their timestamps can be compared.
+* The segmentation model runs on its own thread and keeps only the newest job, so a slow model lowers the update rate of the segmented view but never delays the acquisition or the recording.
 * Images and point clouds are written by a pool of 4 writer threads (`AsyncWriter`). The queue is bounded: if the disk cannot keep up, files are dropped and the status bar shows how many. On exit the queue is flushed, so no file is cut off.
 
 ## Hardware & network
@@ -164,6 +170,7 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
 | hiredis + redis++ | Redis connection to the robot |
 | Ouster SDK (`OusterSDK::ouster_sensor`) | lidar |
 | Daheng Galaxy SDK | cameras: `/usr/lib/libgxiapi.so`, headers in `thirdparty/Galaxy_camera/inc` |
+| ONNX Runtime (optional) | segmentation model: `thirdparty/onnxruntime` (see [step 6](#6-segmentation-model-optional)) |
 
 ## Configuration
 
@@ -261,16 +268,27 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
 * **Window layout:**
   * Header: the recording controls and the robot card (Redis connection, GNSS fix badge, lat/lon, speeds).
   * Middle: one tile per camera.
-  * Bottom: the lidar point cloud, coloured by distance or by the camera colours (selector in the lidar tile header, see [Point cloud colours](#point-cloud-colours)). You can drag the divider between the cameras and the lidar view.
+  * Bottom: the lidar tile with the point cloud. You can drag the divider between the cameras and the lidar view.
 * **⟳ button** (camera tile header): rotates that camera 90° clockwise. The rotation applies to the view and to the saved images; it is not written back to `sensors.json`, so set `rotation` there for a permanent change.
 * **Status dots:** 🟢 streaming, 🟠 connected but waiting for frames, 🔴 offline (hover the dot for the reason).
-* **Point cloud view:**
+* **Lidar tile header controls:**
+
+  | Control | Function |
+  |---|---|
+  | **Colour** selector | distance, camera RGB or segmentation (see [Point cloud colours](#point-cloud-colours)) |
+  | **Image overlay** | segmentation mode: the camera tiles show the classes on top of the images |
+  | **Blobs** | segmentation mode: only the connected objects larger than the **Min. blob size** slider, with a circle around each (see [Blob view](#blob-view)) |
+  | **Bird's-eye view** | the point cloud from above, projected on the ground plane (see [Bird's-eye view](#birds-eye-view)) |
+
+  Under the view: the class legend (segmentation mode), the blob size slider (blob view) and the mouse hints.
+* **Point cloud view (3D):**
   * left drag: rotate
   * right/middle drag: pan
   * scroll: zoom
   * double-click: reset the view
+* **Bird's-eye view:** drag to pan, scroll to zoom, double-click to reset.
 * **Missing sensors:** a sensor that cannot be reached is shown as offline and the application keeps running.
-* **Status bar:** the trigger source, the write queue and the loaded config file.
+* **Status bar:** the trigger source, the write queue, the loaded config file, the number of calibrated cameras and the segmentation model (or `off`).
 
 ### Recording
 
@@ -353,9 +371,23 @@ Segmentation (`Segmenter`, `SegmentationWorker` in `src/Utils/`):
 * The model runs on a **background thread**, so the GUI never waits for it. B0 takes ~55 ms per image on the CPU (i7-13800H), so a scan with 4 cameras is coloured in ~0.25 s: the view updates ~4 times per second. A job that comes in while the model is busy replaces the waiting one, so the view always shows a recent scan.
 * The legend under the point cloud shows the classes with at least 1% of the labelled points, and the time per scan.
 * Class colours: fixed colours for the common outdoor classes (sky light blue, tree dark green, plant green, grass light green, earth brown, person red, …), generated colours for the others.
-* **Image overlay** (check box in the lidar tile, segmentation mode): the camera tiles show the segmented frames with the class colours on top, instead of the live frames. They come from the same scan as the point cloud, so they update at the segmentation rate (~4 Hz).
 
-* **Blobs** (button in the lidar tile, segmentation mode): connected points of the same class form a blob (points closer than ~0.3 m are connected; the ground plane is left out, as it would connect everything on it). Only the points of the blobs with at least the **minimum blob size** (slider under the view, 5 to 5000 points, logarithmic) are shown, each blob with a translucent circle around it (covering 90% of its points). Raising the slider filters out the smaller blobs; the label next to it shows the threshold and the number of blobs. Works in the 3D and the bird's-eye view, ~2 ms per scan (`findBlobs` in `src/Utils/Blobs.cpp`).
+## Lidar views
+
+The check boxes and the **Blobs** button in the lidar tile header change how the (coloured) point cloud is shown. They can be combined: e.g. segmentation + blobs + bird's-eye view gives a 2D map of the objects around the robot.
+
+### Image overlay
+
+**Image overlay** (segmentation mode): the camera tiles show the segmented frames with the class colours blended on top, instead of the live frames. They come from the same scan as the point cloud, so tiles and point cloud always show the same moment; they update at the segmentation rate (~4 Hz on the CPU).
+
+### Blob view
+
+**Blobs** (segmentation mode) turns the segmented point cloud into objects (`findBlobs` in `src/Utils/Blobs.cpp`, ~2 ms per scan):
+
+* Connected points of the same class form a blob: points closer than ~0.3 m are connected (cells of 0.3 m with their 26 neighbours). Classes never mix, so a person next to a wall stays a separate blob.
+* The ground plane (points up to 15 cm above it) is left out, as it would connect everything standing on it.
+* The **Min. blob size** slider under the view (5 to 5000 points, logarithmic) filters on the number of points: blobs with fewer points are removed from the point cloud. The label next to it shows the threshold and the number of blobs left.
+* Each blob is shown with a translucent circle in its class colour around it, at its centroid, covering 90% of its points. In 3D the circles always face the viewer; in the bird's-eye view they are drawn on the ground.
 
 ### Bird's-eye view
 
@@ -375,6 +407,7 @@ The **Bird's-eye view** check box in the lidar tile shows the point cloud from a
 * `image_size`: [width, height] of the (rotated) image the calibration is valid for; other image sizes are not used for colouring
 * `rotation_deg`: camera rotation during calibration (degrees clockwise, as the ⟳ button shows it)
 * `quality`: reprojection errors of the calibration (information only)
+* `image_rotation_deg` (top level, information only): rotation the export applied to the recorded calibration images to match the images of the application (the `15092026_calib` recording was made with the cameras rotated 180°)
 
 Only `intrinsics` and `extrinsics` are required. The file is generated by the calibration project [sensor-calibration-setup](https://gitlab.ilvo.be/vaiop/sensor-calibration-setup) (`treebot-calib export`). It is read by `loadCameraCalib()` in `src/Utils/LidarCamera.cpp`.
 
@@ -399,11 +432,13 @@ include/, src/
 │                         Recording (reads a recording folder back for the replay),
 │                         SensorHeader, PointCloudWidget (OpenGL 3.3), BirdEyeWidget, small example windows
 └── Test/                 The example executables (see table above)
-config/                   sensors.json (addresses), calib.json (intrinsics / extrinsics)
+config/                   sensors.json (addresses, colour mode, segmentation model), calib.json (intrinsics / extrinsics)
+scripts/download_models.sh  Downloads ONNX Runtime and the segmentation model(s)
+models/                   Segmentation models (git-ignored, see step 6 of the installation)
 img/                      Images used in this README
 ```
 
 ## Notes
 
 * **Signals and slots:** AUTOMOC only generates code for `Q_OBJECT` headers that are part of a target. `RecordWidget` and `ReplayWidget` are the `Q_OBJECT` classes. `RecordWidget.h` is listed in `mocHeaders` in `src/Test/CMakeLists.txt` (shared with `qt_example_filedialog`), `ReplayWidget.h` directly in the `qt_example_full` target. If you add a new `Q_OBJECT` class, add its header to the targets that use it (the old symlink trick is no longer needed).
-* **OpenGL:** the point cloud view needs OpenGL 3.3. Without it (e.g. over X forwarding) the view stays empty and a warning is printed, but the application keeps working.
+* **OpenGL:** the point cloud view needs OpenGL 3.3 (the blob circles use instanced drawing). Without it (e.g. over X forwarding) the view stays empty and a warning is printed, but the application keeps working.
