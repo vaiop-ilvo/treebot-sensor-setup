@@ -1,0 +1,54 @@
+__pycache__/
+python/build/
+python/dist/
+python/.tox/
+python/**/*.egg-info/
+python/**/*.so
+python/**/*.dll
+python/**/*.pyd
+
+/build
+python/artifacts/
+
+# visual studio
+.vs/
+out/
+
+# vim
+*.swp
+
+# emacs
+.dir.locals.el
+.ccls-cache
+
+# CMake, Ninja
+.ninja_deps
+.ninja_log
+CMakeFiles
+CTestTestfile.cmake
+compile_commands.json
+
+# Built artifacts
+generated
+rules.ninja
+*.a
+**/_build
+clang-tidy-output.{txt,json}
+
+# Images
+*.ppm
+*.jpg
+*.png
+# ... except the documentation images
+!img/*.jpg
+!img/*.png
+
+# Lidar data
+*.pcap
+
+# Boost
+include/boost
+libs/
+
+# Thirdparty
+thirdparty/*

@@ -1,0 +1,16 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            // All values come from the C_Cpp.default.* entries in settings.json
+            "compileCommands": "${default}",
+            "includePath": ["${default}"],
+            "defines": ["${default}"],
+            "compilerPath": "${default}",
+            "cStandard": "${default}",
+            "cppStandard": "${default}",
+            "intelliSenseMode": "${default}"
+        }
+    ],
+    "version": 4
+}

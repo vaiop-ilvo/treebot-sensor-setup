@@ -1,0 +1,16 @@
+{
+  "lidar": {
+    "ip": "192.168.3.150"
+  },
+  "cameras": [
+    { "name": "cam1", "ip": "192.168.2.14", "rotation": "ccw" },
+    { "name": "cam2", "ip": "192.168.2.13", "rotation": "cw" },
+    { "name": "cam3", "ip": "192.168.2.12", "rotation": "ccw" },
+    { "name": "cam4", "ip": "192.168.2.11", "rotation": "cw" }
+  ],
+  "robot": {
+    "host": "192.168.1.20",
+    "port": 6379
+  },
+  "calibration": "config/calib.json"
+}

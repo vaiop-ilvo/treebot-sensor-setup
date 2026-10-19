@@ -1,0 +1,46 @@
+{
+    "tasks": [
+        {
+            "label": "disable ASAN",
+            "type": "shell",
+            "command": "export",
+            "args": [
+                "ASAN_OPTIONS=detect_leaks=0"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "disable alloc ASAN",
+            "type": "shell",
+            "command": "export",
+            "args": [
+                "ASAN_OPTIONS=alloc_dealloc_mismatch=0"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "build qt_example_full",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "build",
+                "-j",
+                "qt_example_full"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": {
+                "base": "$gcc",
+                // On MSYS2 on Windows, vscode doesn't realise that the paths in compiler errors and warnings
+                // are absolute. The following forces vscode to interpret the paths as absolute.
+                "fileLocation": [
+                    "absolute"
+                ]
+            },
+        }
+    ],
+    "version": "2.0.0"
+}
