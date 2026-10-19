@@ -117,9 +117,20 @@ make -j && sudo make install && cd ../../..
    * `set_all_nic_mtu_9000.sh`: jumbo frames (MTU 9000) on the camera network cards
    * `SetSocketBufferSize.sh`: larger receive buffers, so fewer frames are lost
 
-`thirdparty/` is git-ignored, so steps 4 and 5 have to be done on every new machine.
+### 6. Segmentation model (optional)
 
-### 6. Network
+The segmentation colour mode needs [ONNX Runtime](https://onnxruntime.ai/) and a pretrained model. One script downloads both (ONNX Runtime 1.20.1 to `thirdparty/onnxruntime`, the model to `models/`):
+
+```bash
+scripts/download_models.sh          # SegFormer-B0 (15 MB, fast enough on the CPU)
+scripts/download_models.sh b2       # SegFormer-B2 (sharper; for a GPU build of ONNX Runtime)
+```
+
+Without ONNX Runtime the application still builds; the segmentation mode is then disabled. CMake reports `ONNX Runtime found … (point cloud segmentation enabled)` when it is used.
+
+`thirdparty/` and `models/` are git-ignored, so steps 4 to 6 have to be done on every new machine.
+
+### 7. Network
 
 Give the PC a static address on each sensor network (see [Hardware & network](#hardware--network)):
 
@@ -128,7 +139,7 @@ Give the PC a static address on each sensor network (see [Hardware & network](#h
 
 Check that the sensors answer: `ping 192.168.2.11` (cameras .11 to .14) and `ping 192.168.3.150` (lidar). If the camera addresses are different, set them with **GxGigeIPConfig** or change [`config/sensors.json`](#configuration).
 
-### 7. Build
+### 8. Build
 
 ```bash
 mkdir -p build && cd build
@@ -169,12 +180,23 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
   ],
   "robot":   { "host": "192.168.1.20", "port": 6379 },
   "calibration": "config/calib.json",
-  "pointcloud_color": "rgb"
+  "pointcloud_color": "rgb",
+  "segmentation": {
+    "model": "models/segformer-b0-ade",
+    "input_size": 512,
+    "threads": 0,
+    "min_confidence": 0.0
+  }
 }
 ```
 
 * `rotation`: `cw`, `ccw`, `180`, or leave it out for no rotation.
-* `pointcloud_color`: initial colouring of the point cloud, `distance` (default), `rgb` or `segmentation` (not implemented yet, falls back to `distance`). It can be changed in the lidar tile while the application runs (see [Point cloud colours](#point-cloud-colours)).
+* `pointcloud_color`: initial colouring of the point cloud, `distance` (default), `rgb` or `segmentation` (falls back to `distance` when no model is available). It can be changed in the lidar tile while the application runs (see [Point cloud colours](#point-cloud-colours)).
+* `segmentation` (optional): the model for the segmentation colour mode.
+  * `model`: folder with `model.onnx` and `config.json` (class names), relative to the repository root
+  * `input_size`: long side of the network input in pixels (the image is scaled to it, aspect ratio kept). Smaller is faster and coarser
+  * `threads`: ONNX Runtime threads, `0` = all cores
+  * `min_confidence`: pixels where the model's class probability is lower stay unlabelled (grey), `0` = label everything
 * The file is searched in this order:
   1. the path given as first argument of `qt_example_full`
   2. `./config/sensors.json`
@@ -196,7 +218,8 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
-| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png` |
+| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode |
+| `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found) |
 | `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
 ## Using the application
@@ -313,7 +336,7 @@ The selector in the header of the lidar tile chooses how the point cloud is colo
 |---|---|
 | **Distance** | Turbo colormap on the distance to the lidar, 0 m (blue) to 15 m (red) |
 | **Camera RGB** | Colour of the camera pixel each point projects onto, using `config/calib.json`. Grey: not seen by any camera |
-| **Segmentation** | Not implemented yet (disabled) |
+| **Segmentation** | Class colour of a segmentation model on the camera images, projected like the RGB mode. Grey: not seen by any camera. Disabled when no model is available |
 
 Camera RGB (`CameraColorizer` in `src/Utils/PointCloudColor.cpp`):
 
@@ -322,6 +345,14 @@ Camera RGB (`CameraColorizer` in `src/Utils/PointCloudColor.cpp`):
 * A point seen by several cameras takes the colour of the camera that sees it closest to its image centre (least distortion).
 * **Live:** the cloud is coloured with the frames of its row (the frames closest to the lidar timestamp, at most 50 ms away), so it is shown once the camera frames are in. A camera rotated differently than during calibration (⟳ button) is not used, and a warning is printed.
 * **Replay:** the recorded images of the row are used; changing the mode while paused recolours the current row.
+
+Segmentation (`Segmenter`, `SegmentationWorker` in `src/Utils/`):
+
+* The default model is **SegFormer-B0 trained on ADE20K**: a general model with 150 classes (sky, tree, plant, grass, earth, floor, road, person, car, building, wall, …). It does not separate trunk, branch and leaf: those need a model trained on our own images, which can replace it without code changes (same ONNX input/output, see `config.json` for the class names).
+* Each camera image is segmented (class per pixel), then the points take the class of their pixel with exactly the same projection, occlusion test and camera choice as the RGB mode.
+* The model runs on a **background thread**, so the GUI never waits for it. B0 takes ~55 ms per image on the CPU (i7-13800H), so a scan with 4 cameras is coloured in ~0.25 s: the view updates ~4 times per second. A job that comes in while the model is busy replaces the waiting one, so the view always shows a recent scan.
+* The legend under the point cloud shows the classes with at least 1% of the labelled points, and the time per scan.
+* Class colours: fixed colours for the common outdoor classes (sky light blue, tree dark green, plant green, grass light green, earth brown, person red, …), generated colours for the others.
 
 ## Calibration file
 
@@ -347,7 +378,9 @@ include/, src/
 ├── Utils/AsyncWriter     Bounded worker pool that writes images and point clouds to disk
 ├── Utils/SensorConfig    Loads config/sensors.json
 ├── Utils/LidarCamera     Calibration loading (config/calib.json)
-├── Utils/PointCloudColor Point cloud colour modes: distance, camera RGB (projection + occlusion test)
+├── Utils/PointCloudColor Point cloud colour modes: distance, camera RGB / class maps (projection + occlusion test)
+├── Utils/Segmenter       Semantic segmentation of an image with an ONNX model (ONNX Runtime)
+├── Utils/SegmentationWorker Background thread: segments the camera images and colours the point cloud by class
 ├── Utils/MetaData.hpp    Metadata structs for robot, lidar and cameras
 ├── Gui/                  MainWindow (main app), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
 │                         Recording (reads a recording folder back for the replay),

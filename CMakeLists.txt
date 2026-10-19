@@ -78,6 +78,22 @@ cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
 find_package(PCL REQUIRED io)
 find_package(Eigen3 REQUIRED)
 
+# ONNX Runtime (optional): colouring the point cloud with a segmentation model.
+# Unpack a release from https://github.com/microsoft/onnxruntime/releases in thirdparty/onnxruntime.
+set(ONNXRUNTIME_ROOT "${PROJECT_SOURCE_DIR}/thirdparty/onnxruntime" CACHE PATH "ONNX Runtime folder (include/, lib/)")
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+    HINTS "${ONNXRUNTIME_ROOT}/include" PATH_SUFFIXES onnxruntime onnxruntime/core/session)
+find_library(ONNXRUNTIME_LIB onnxruntime HINTS "${ONNXRUNTIME_ROOT}/lib")
+if (ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
+    message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIB} (point cloud segmentation enabled)")
+    add_compile_definitions(WITH_SEGMENTATION)
+    include_directories(${ONNXRUNTIME_INCLUDE_DIR})
+    set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIB})
+else ()
+    message(STATUS "ONNX Runtime not found in ${ONNXRUNTIME_ROOT}: point cloud segmentation disabled")
+    set(ONNXRUNTIME_LIBRARIES "")
+endif ()
+
 # Find Qt5 
 find_package(Qt5 REQUIRED COMPONENTS Core Gui OpenGL Widgets REQUIRED)
 # Enable automatic MOC, UIC, and RCC processing

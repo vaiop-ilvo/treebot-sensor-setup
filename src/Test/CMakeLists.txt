@@ -130,6 +130,7 @@ target_link_libraries(qt_example_full
   Eigen3::Eigen
   ${HIREDIS_LIB}
   ${REDIS_PLUS_PLUS_LIB}
+  ${ONNXRUNTIME_LIBRARIES}
 )
 
 add_executable(qt_example_filedialog "qt_example_filedialog.cpp"
@@ -166,12 +167,14 @@ target_link_libraries(read_config
 add_executable(colorize_cloud "colorize_cloud.cpp"
   "${SRC_DIR}/Utils/LidarCamera.cpp"
   "${SRC_DIR}/Utils/PointCloudColor.cpp"
+  "${SRC_DIR}/Utils/Segmenter.cpp"
 )
 target_link_libraries(colorize_cloud
   ${Qt_LIBS}
   ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
   Eigen3::Eigen
+  ${ONNXRUNTIME_LIBRARIES}
 )
 
 add_executable(capture_snapshot "capture_snapshot.cpp"
@@ -189,4 +192,13 @@ target_link_libraries(capture_snapshot
   ${Qt_LIBS}
   ${PCL_LIBRARIES}
   Eigen3::Eigen
+)
+
+add_executable(segment_image "segment_image.cpp"
+  "${SRC_DIR}/Utils/Segmenter.cpp"
+)
+target_link_libraries(segment_image
+  ${Qt_LIBS}
+  ${OpenCV_LIBS}
+  ${ONNXRUNTIME_LIBRARIES}
 )

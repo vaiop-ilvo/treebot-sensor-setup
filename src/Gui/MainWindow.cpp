@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QDebug>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QSplitter>
 #include <QStatusBar>
@@ -43,9 +44,17 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
     colorizer = CameraColorizer(std::move(calibs));
     rotationWarned.assign(config.cameras.size(), false);
 
+    // Segmentation model on a background thread; its results are shown on the GUI thread
+    segmentation = std::make_unique<SegmentationWorker>(config.segmentation, colorizer, [this](SegmentationWorker::Result result) {
+        QMetaObject::invokeMethod(this, [this, result]() { showSegmentation(result); }, Qt::QueuedConnection);
+    });
+    if (!config.segmentation.modelDir.empty() && !segmentation->isAvailable()) {
+        qWarning().noquote() << QString::fromStdString(segmentation->error());
+    }
+
     colorMode = colorModeFromString(config.pointCloudColor);
-    if (colorMode == ColorMode::Segmentation) {
-        qWarning() << "Point cloud colouring by segmentation is not implemented yet, colouring by distance";
+    if (colorMode == ColorMode::Segmentation && !segmentation->isAvailable()) {
+        qWarning() << "No segmentation model available, colouring the point cloud by distance";
         colorMode = ColorMode::Distance;
     }
 
@@ -108,7 +117,11 @@ void MainWindow::setupUI()
 
     // Lidar
     lidarWidget = new LidarWidget(central);
+    lidarWidget->setSegmentationAvailable(segmentation->isAvailable(), QString::fromStdString(segmentation->error()));
     lidarWidget->setColorMode(colorMode);
+    if (colorMode == ColorMode::Segmentation) {
+        lidarWidget->setLegend({}, "Segmenting…");
+    }
     lidarWidget->onColorModeChanged([this](ColorMode mode) { setColorMode(mode); });
 
     // Cameras and lidar share the space; the user can drag the divider
@@ -127,10 +140,11 @@ void MainWindow::setupUI()
     // Status bar
     triggerStatus = new QLabel(this);
     writerStatus = new QLabel(this);
-    configStatus = new QLabel(QString("%1 · calibration: %2/%3 cameras")
+    configStatus = new QLabel(QString("%1 · calibration: %2/%3 cameras · segmentation: %4")
         .arg(config.sourceFile.empty() ? QString("config: built-in defaults") : QString("config: %1").arg(QString::fromStdString(config.sourceFile)))
         .arg(colorizer.validCount())
-        .arg(config.cameras.size()), this);
+        .arg(config.cameras.size())
+        .arg(segmentation->isAvailable() ? QFileInfo(QString::fromStdString(config.segmentation.modelDir)).fileName() : QString("off")), this);
     configStatus->setToolTip(QString::fromStdString(config.calibFileName));
     statusBar()->addWidget(triggerStatus);
     statusBar()->addWidget(writerStatus);
@@ -234,6 +248,7 @@ void MainWindow::startReplay()
     }
 
     replaying = true;
+    segmentationTag++;
     pending.clear();    // Rows waiting for camera frames are only previews: replay never starts while recording
     headerStack->setCurrentWidget(replayWidget);
     for (CameraWidget* cameraWidget : cameraWidgets) {
@@ -245,6 +260,7 @@ void MainWindow::startReplay()
 void MainWindow::stopReplay()
 {
     replaying = false;
+    segmentationTag++;
     headerStack->setCurrentWidget(recordWidget);
 
     // Back to the live state of each sensor; the next trigger shows fresh data
@@ -276,7 +292,13 @@ void MainWindow::stopReplay()
 void MainWindow::setColorMode(ColorMode mode)
 {
     colorMode = mode;
-    if (mode == ColorMode::Rgb && colorizer.validCount() == 0) {
+    segmentationTag++;
+    if (mode == ColorMode::Segmentation) {
+        lidarWidget->setLegend({}, "Segmenting…");
+    } else {
+        lidarWidget->clearLegend();
+    }
+    if (mode != ColorMode::Distance && colorizer.validCount() == 0) {
         statusBar()->showMessage(QString("No camera calibration in %1: the point cloud stays grey")
             .arg(QString::fromStdString(config.calibFileName)), 8000);
     }
@@ -294,6 +316,41 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> MainWindow::colorWithCameras(const 
     return colored;
 }
 
+void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
+{
+    // Outdated: another colour mode, or switched between live and replay since the job was submitted
+    if (result.tag != segmentationTag || colorMode != ColorMode::Segmentation) {
+        return;
+    }
+    lidarWidget->setPointCloud(result.cloud);
+
+    // Legend: the classes with at least 1% of the labelled points, largest first
+    constexpr double MIN_SHARE = 0.01;
+    constexpr size_t MAX_ENTRIES = 10;
+    size_t labelled = 0;
+    for (const size_t n : result.classPoints) {
+        labelled += n;
+    }
+    std::vector<size_t> order(result.classPoints.size());
+    for (size_t k = 0; k < order.size(); ++k) {
+        order[k] = k;
+    }
+    std::sort(order.begin(), order.end(), [&result](size_t a, size_t b) { return result.classPoints[a] > result.classPoints[b]; });
+
+    std::vector<LidarWidget::LegendEntry> entries;
+    const auto& names = segmentation->classNames();
+    const auto& palette = segmentation->palette();
+    for (const size_t k : order) {
+        const double share = labelled > 0 ? static_cast<double>(result.classPoints[k]) / labelled : 0.0;
+        if (share < MIN_SHARE || entries.size() >= MAX_ENTRIES) {
+            break;
+        }
+        entries.push_back({QString::fromStdString(names[k]), QColor(palette[k][0], palette[k][1], palette[k][2]), share});
+    }
+    lidarWidget->setLegend(entries, QString("%1k of %2k points labelled · %3 ms")
+        .arg(labelled / 1000).arg(result.cloud->size() / 1000).arg(result.ms, 0, 'f', 0));
+}
+
 void MainWindow::showRecordedFrame(const RecordedFrame& frame)
 {
     if (!replaying) {
@@ -302,7 +359,7 @@ void MainWindow::showRecordedFrame(const RecordedFrame& frame)
     lastReplayFrame = frame;
 
     if (frame.pointCloud) {
-        if (colorMode == ColorMode::Rgb) {
+        if (colorMode == ColorMode::Rgb || colorMode == ColorMode::Segmentation) {
             std::vector<cv::Mat> imagesRGB(frame.images.size());
             for (size_t i = 0; i < frame.images.size(); ++i) {
                 if (!frame.images[i].isNull()) {
@@ -311,7 +368,12 @@ void MainWindow::showRecordedFrame(const RecordedFrame& frame)
                                            static_cast<size_t>(rgb.bytesPerLine())).clone();
                 }
             }
-            lidarWidget->setPointCloud(colorWithCameras(*frame.pointCloud, imagesRGB));
+            if (colorMode == ColorMode::Rgb) {
+                lidarWidget->setPointCloud(colorWithCameras(*frame.pointCloud, imagesRGB));
+            } else {
+                // Shown when the worker is done (showSegmentation)
+                segmentation->submit({segmentationTag, frame.pointCloud, std::move(imagesRGB)});
+            }
         } else {
             lidarWidget->setPointCloud(frame.pointCloud);
         }
@@ -379,9 +441,9 @@ void MainWindow::startCapture()
         auto pc = lidarPtr->getPointCloud();
         lidarPtr->getMetaData(capture.lidar);
         if (pc != nullptr) {
-            // RGB: shown when the camera frames of the row are in (finishCapture)
+            // RGB and segmentation: shown when the camera frames of the row are in (finishCapture)
             capture.pointCloud = pc;
-            if (colorMode != ColorMode::Rgb) {
+            if (colorMode == ColorMode::Distance) {
                 lidarWidget->setPointCloud(pc);
             }
             lidarWidget->setInfo(lidarPtr->getIp(), lidarPtr->getFps(), lidarPtr->getFrameId(), pc->size(), Theme::Status::Ok);
@@ -473,8 +535,13 @@ void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
         }
     }
 
-    if (showCloud && capture.pointCloud && colorMode == ColorMode::Rgb) {
-        lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
+    if (showCloud && capture.pointCloud) {
+        if (colorMode == ColorMode::Rgb) {
+            lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
+        } else if (colorMode == ColorMode::Segmentation) {
+            // The worker keeps only the newest job, so it never falls behind the scans
+            segmentation->submit({segmentationTag, capture.pointCloud, std::move(imagesRGB)});
+        }
     }
 
     if (record) {

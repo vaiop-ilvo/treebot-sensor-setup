@@ -1,8 +1,10 @@
-// Colours a recorded point cloud with recorded camera images, as the main application does in RGB mode.
-// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...]
+// Colours a recorded point cloud with recorded camera images, as the main application does in RGB mode,
+// or with the class colours of a segmentation model (segmentation mode) when --model is given.
+// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>]
 // The output is a binary PLY with x, y, z, red, green, blue.
 #include <Utils/LidarCamera.h>
 #include <Utils/PointCloudColor.h>
+#include <Utils/Segmenter.h>
 
 #include <pcl/io/ply_io.h>
 #include <pcl/point_types.h>
@@ -17,7 +19,7 @@
 int main(int argc, char* argv[])
 {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...]\n";
+        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>]\n";
         return 1;
     }
     const std::string calibFile = argv[1];
@@ -35,8 +37,13 @@ int main(int argc, char* argv[])
 
     std::vector<CameraCalib> calibs;
     std::vector<cv::Mat> imagesRGB;
+    SegmentationConfig segConfig;
     for (int i = 4; i < argc; ++i) {
         const std::string arg = argv[i];
+        if (arg == "--model" && i + 1 < argc) {
+            segConfig.modelDir = argv[++i];
+            continue;
+        }
         const size_t eq = arg.find('=');
         if (eq == std::string::npos) {
             std::cerr << "Expected camN=<image>, got " << arg << "\n";
@@ -59,8 +66,35 @@ int main(int argc, char* argv[])
     }
 
     const CameraColorizer colorizer(std::move(calibs));
+    size_t nColored = 0;
     const auto tic = std::chrono::steady_clock::now();
-    const size_t nColored = colorizer.colorize(cloud, imagesRGB);
+    if (segConfig.modelDir.empty()) {
+        nColored = colorizer.colorize(cloud, imagesRGB);
+    } else {
+        Segmenter segmenter(segConfig);
+        if (!segmenter.isAvailable()) {
+            std::cerr << segmenter.error() << "\n";
+            return 1;
+        }
+        std::vector<cv::Mat> labelMaps;
+        for (const cv::Mat& image : imagesRGB) {
+            labelMaps.push_back(segmenter.segment(image));
+        }
+        std::vector<uint8_t> labels;
+        nColored = colorizer.colorizeLabels(cloud, labelMaps, segmenter.palette(), &labels);
+
+        std::vector<size_t> counts(segmenter.classNames().size(), 0);
+        for (const uint8_t label : labels) {
+            if (label < counts.size()) counts[label]++;
+        }
+        std::cout << "Point classes:";
+        for (size_t k = 0; k < counts.size(); ++k) {
+            if (counts[k] * 100 >= nColored) {
+                std::cout << " " << segmenter.classNames()[k] << " " << counts[k];
+            }
+        }
+        std::cout << "\n";
+    }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tic).count();
     std::cout << nColored << " of " << cloud.size() << " points coloured by " << imagesRGB.size() << " camera(s) in " << ms << " ms\n";
 

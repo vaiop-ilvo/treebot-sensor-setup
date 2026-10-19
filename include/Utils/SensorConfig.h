@@ -10,6 +10,14 @@ struct CameraInfo {
     std::string calibFileName;
 };
 
+// Settings of the segmentation model (the "segmentation" block of sensors.json)
+struct SegmentationConfig {
+    std::string modelDir;       // Folder with model.onnx and config.json (id2label), empty = no model
+    int inputSize = 512;        // Long side of the network input in pixels (the short side keeps the aspect ratio)
+    int threads = 0;            // ONNX Runtime threads, 0 = all cores
+    float minConfidence = 0.0f; // Pixels with a lower class probability are UNKNOWN
+};
+
 struct SensorConfig {
     std::string lidarIp = "192.168.3.150";
     std::vector<CameraInfo> cameras;
@@ -17,6 +25,7 @@ struct SensorConfig {
     int robotPort = 6379;
     std::string calibFileName = "config/calib.json";
     std::string pointCloudColor = "distance";  // Initial point cloud colouring: distance, rgb or segmentation
+    SegmentationConfig segmentation;
     std::string sourceFile;     // File the config was read from, empty when the defaults are used
 
     // The rig defaults (used when no config file is found)

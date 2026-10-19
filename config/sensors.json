@@ -13,5 +13,11 @@
     "port": 6379
   },
   "calibration": "config/calib.json",
-  "pointcloud_color": "rgb"
+  "pointcloud_color": "rgb",
+  "segmentation": {
+    "model": "models/segformer-b0-ade",
+    "input_size": 512,
+    "threads": 0,
+    "min_confidence": 0.0
+  }
 }

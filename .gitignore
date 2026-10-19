@@ -52,3 +52,5 @@ libs/
 
 # Thirdparty
 thirdparty/*
+# Segmentation models (scripts/download_models.sh)
+/models

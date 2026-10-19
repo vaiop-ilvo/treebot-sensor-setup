@@ -20,6 +20,7 @@
 #include <Camera/Daheng.h>
 #include <Robot/ArtofRobot.h>
 #include <Utils/PointCloudColor.h>
+#include <Utils/SegmentationWorker.h>
 #include <Utils/SensorConfig.h>
 
 class MainWindow : public QMainWindow {
@@ -74,6 +75,7 @@ private:
     ColorMode colorMode = ColorMode::Distance;
     CameraColorizer colorizer;                    // Calibrations in the order of config.cameras
     std::vector<bool> rotationWarned;             // A rotation mismatch is reported once per camera
+    uint64_t segmentationTag = 0;                 // Changes with the colour mode and live/replay: older results are dropped
 
     void setupUI();
     void connectSensors();
@@ -91,6 +93,11 @@ private:
     // Copy of the cloud coloured with the camera images (RGB, index = camera index, empty = no image)
     std::shared_ptr<std::vector<vaiop::QtPoint>> colorWithCameras(const std::vector<vaiop::QtPoint>& cloud,
                                                                   const std::vector<cv::Mat>& imagesRGB) const;
+    // Shows a point cloud coloured by the segmentation worker (GUI thread)
+    void showSegmentation(const SegmentationWorker::Result& result);
     void updateStatus();
     std::string recordPath(const QString& relative) const;
+
+    // Last member: its thread is stopped first when the window is destroyed
+    std::unique_ptr<SegmentationWorker> segmentation;
 };

@@ -69,20 +69,21 @@ size_t CameraColorizer::validCount() const
     return std::count_if(calibrations.begin(), calibrations.end(), [](const CameraCalib& c) { return c.valid; });
 }
 
-size_t CameraColorizer::colorize(std::vector<vaiop::QtPoint>& cloud, const std::vector<cv::Mat>& imagesRGB) const
+std::vector<CameraColorizer::PointView> CameraColorizer::visibility(const std::vector<vaiop::QtPoint>& cloud,
+                                                                   const std::vector<cv::Size>& imageSizes) const
 {
     const size_t n = cloud.size();
-    // Per point: squared distance to the image centre (normalised plane) of the camera that coloured it
+    std::vector<PointView> views(n);
+    // Per point: squared distance to the image centre (normalised plane) of the camera that sees it
     std::vector<float> bestScore(n, std::numeric_limits<float>::infinity());
-    std::vector<QVector3D> colors(n, UNSEEN_COLOR);
 
-    for (size_t c = 0; c < calibrations.size() && c < imagesRGB.size(); ++c) {
+    for (size_t c = 0; c < calibrations.size() && c < imageSizes.size(); ++c) {
         const CameraCalib& calib = calibrations[c];
-        const cv::Mat& image = imagesRGB[c];
-        if (!calib.valid || image.empty() || image.type() != CV_8UC3) {
+        const cv::Size& imageSize = imageSizes[c];
+        if (!calib.valid || imageSize.area() == 0) {
             continue;
         }
-        if (calib.imageSize.area() > 0 && image.size() != calib.imageSize) {
+        if (calib.imageSize.area() > 0 && imageSize != calib.imageSize) {
             continue;   // Other rotation or resolution than calibrated
         }
 
@@ -119,11 +120,11 @@ size_t CameraColorizer::colorize(std::vector<vaiop::QtPoint>& cloud, const std::
 
         // 3. Depth buffer for the occlusion test: nearest point per cell, then the minimum over 3 x 3 cells
         //    (the lidar is sparser than the image, so a single cell would let the background shine through)
-        const int cols = (image.cols + DEPTH_CELL - 1) / DEPTH_CELL;
-        const int rows = (image.rows + DEPTH_CELL - 1) / DEPTH_CELL;
+        const int cols = (imageSize.width + DEPTH_CELL - 1) / DEPTH_CELL;
+        const int rows = (imageSize.height + DEPTH_CELL - 1) / DEPTH_CELL;
         cv::Mat depth(rows, cols, CV_32F, cv::Scalar(std::numeric_limits<float>::infinity()));
-        auto inImage = [&image](const cv::Point2f& px) {
-            return px.x >= 0.0f && px.y >= 0.0f && px.x < image.cols - 0.5f && px.y < image.rows - 0.5f;
+        auto inImage = [&imageSize](const cv::Point2f& px) {
+            return px.x >= 0.0f && px.y >= 0.0f && px.x < imageSize.width - 0.5f && px.y < imageSize.height - 0.5f;
         };
         for (size_t k = 0; k < pixels.size(); ++k) {
             if (!inImage(pixels[k])) {
@@ -134,7 +135,7 @@ size_t CameraColorizer::colorize(std::vector<vaiop::QtPoint>& cloud, const std::
         }
         cv::erode(depth, depth, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)));
 
-        // 4. Sample the image for the visible points
+        // 4. Keep the visible points, with the camera that sees them closest to its image centre
         for (size_t k = 0; k < pixels.size(); ++k) {
             const cv::Point2f& px = pixels[k];
             if (!inImage(px)) {
@@ -153,15 +154,63 @@ size_t CameraColorizer::colorize(std::vector<vaiop::QtPoint>& cloud, const std::
                 continue;
             }
             bestScore[i] = score;
-            const cv::Vec3b rgb = image.at<cv::Vec3b>(static_cast<int>(px.y + 0.5f), static_cast<int>(px.x + 0.5f));
-            colors[i] = QVector3D(rgb[0], rgb[1], rgb[2]) / 255.0f;
+            views[i].camera = static_cast<int>(c);
+            views[i].pixel = cv::Point(static_cast<int>(px.x + 0.5f), static_cast<int>(px.y + 0.5f));
         }
+    }
+    return views;
+}
+
+size_t CameraColorizer::colorize(std::vector<vaiop::QtPoint>& cloud, const std::vector<cv::Mat>& imagesRGB) const
+{
+    std::vector<cv::Size> sizes(imagesRGB.size());
+    for (size_t c = 0; c < imagesRGB.size(); ++c) {
+        if (!imagesRGB[c].empty() && imagesRGB[c].type() == CV_8UC3) {
+            sizes[c] = imagesRGB[c].size();
+        }
+    }
+    const std::vector<PointView> views = visibility(cloud, sizes);
+
+    size_t nColored = 0;
+    for (size_t i = 0; i < cloud.size(); ++i) {
+        if (views[i].camera < 0) {
+            cloud[i].color = UNSEEN_COLOR;
+            continue;
+        }
+        const cv::Vec3b rgb = imagesRGB[views[i].camera].at<cv::Vec3b>(views[i].pixel);
+        cloud[i].color = QVector3D(rgb[0], rgb[1], rgb[2]) / 255.0f;
+        nColored++;
+    }
+    return nColored;
+}
+
+size_t CameraColorizer::colorizeLabels(std::vector<vaiop::QtPoint>& cloud, const std::vector<cv::Mat>& labelMaps,
+                                       const std::vector<cv::Vec3b>& palette, std::vector<uint8_t>* labels) const
+{
+    std::vector<cv::Size> sizes(labelMaps.size());
+    for (size_t c = 0; c < labelMaps.size(); ++c) {
+        if (!labelMaps[c].empty() && labelMaps[c].type() == CV_8U) {
+            sizes[c] = labelMaps[c].size();
+        }
+    }
+    const std::vector<PointView> views = visibility(cloud, sizes);
+    if (labels) {
+        labels->assign(cloud.size(), UNSEEN_LABEL);
     }
 
     size_t nColored = 0;
-    for (size_t i = 0; i < n; ++i) {
-        cloud[i].color = colors[i];
-        nColored += std::isfinite(bestScore[i]) ? 1 : 0;
+    for (size_t i = 0; i < cloud.size(); ++i) {
+        const uint8_t label = views[i].camera < 0 ? UNSEEN_LABEL : labelMaps[views[i].camera].at<uint8_t>(views[i].pixel);
+        if (label >= palette.size()) {
+            cloud[i].color = UNSEEN_COLOR;
+            continue;
+        }
+        const cv::Vec3b& rgb = palette[label];
+        cloud[i].color = QVector3D(rgb[0], rgb[1], rgb[2]) / 255.0f;
+        if (labels) {
+            (*labels)[i] = label;
+        }
+        nColored++;
     }
     return nColored;
 }

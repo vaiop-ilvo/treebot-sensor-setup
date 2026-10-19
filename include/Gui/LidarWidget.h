@@ -5,6 +5,7 @@
 #include <QLabel>
 
 #include <functional>
+#include <vector>
 
 #include <Gui/PointCloudWidget.h>
 #include <Gui/SensorHeader.h>
@@ -26,10 +27,22 @@ public:
     void setColorMode(ColorMode mode);
     // Called when the user picks another colour mode
     void onColorModeChanged(std::function<void(ColorMode)> callback);
+    // Enables the segmentation mode; reason is shown as tooltip when it is not available
+    void setSegmentationAvailable(bool available, const QString& reason = {});
+
+    // Classes shown under the point cloud in segmentation mode: (name, colour, share of the labelled points)
+    struct LegendEntry {
+        QString name;
+        QColor color;
+        double share = 0.0;
+    };
+    void setLegend(const std::vector<LegendEntry>& entries, const QString& note = {});
+    void clearLegend();
 
 private:
     SensorHeader* header;
     PointCloudWidget* pointCloudWidget;
     QLabel* messageLabel;
     QComboBox* colorBox;
+    QLabel* legendLabel;
 };

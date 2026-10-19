@@ -98,6 +98,12 @@ SensorConfig SensorConfig::load(const std::string& path)
 
     config.pointCloudColor = root["pointcloud_color"].toString(QString::fromStdString(config.pointCloudColor)).toStdString();
 
+    const QJsonObject segmentation = root["segmentation"].toObject();
+    config.segmentation.modelDir = resolveRelative(file, segmentation["model"].toString());
+    config.segmentation.inputSize = segmentation["input_size"].toInt(config.segmentation.inputSize);
+    config.segmentation.threads = segmentation["threads"].toInt(config.segmentation.threads);
+    config.segmentation.minConfidence = static_cast<float>(segmentation["min_confidence"].toDouble(config.segmentation.minConfidence));
+
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();
 
