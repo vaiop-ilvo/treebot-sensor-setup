@@ -36,9 +36,10 @@ BirdEyeWidget::BirdEyeWidget(QWidget* parent)
     resetView();
 }
 
-void BirdEyeWidget::setPoints(std::vector<BirdEyePoint> newPoints, const GroundPlane& newPlane)
+void BirdEyeWidget::setPoints(std::vector<BirdEyePoint> newPoints, const GroundPlane& newPlane, std::vector<BirdEyeBlob> newBlobs)
 {
     points = std::move(newPoints);
+    blobs = std::move(newBlobs);
     plane = newPlane;
     imageDirty = true;
     update();
@@ -102,6 +103,19 @@ void BirdEyeWidget::paintEvent(QPaintEvent*)
         painter.drawEllipse(origin, r * pixelsPerMeter, r * pixelsPerMeter);
         painter.setPen(Theme::viewportText);
         painter.drawText(origin + QPointF(4, -r * pixelsPerMeter - 3), QString("%1 m").arg(r));
+    }
+
+    // Blobs: translucent circles around their points, same height range as the points
+    for (const BirdEyeBlob& blob : blobs) {
+        if (blob.height < v.minHeight || blob.height > v.maxHeight) {
+            continue;
+        }
+        QColor color = QColor::fromRgbF(std::clamp(blob.color.x(), 0.0f, 1.0f), std::clamp(blob.color.y(), 0.0f, 1.0f),
+                                        std::clamp(blob.color.z(), 0.0f, 1.0f));
+        painter.setPen(QPen(color, 1.5));
+        color.setAlpha(55);
+        painter.setBrush(color);
+        painter.drawEllipse(toWidget(blob.forward, blob.left), blob.radius * pixelsPerMeter, blob.radius * pixelsPerMeter);
     }
 
     // Lidar: a triangle pointing forward

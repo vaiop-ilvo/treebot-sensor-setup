@@ -16,7 +16,9 @@ namespace {
 PointCloudWidget::PointCloudWidget(QWidget* parent)
     : QOpenGLWidget(parent),
       vbo(QOpenGLBuffer::VertexBuffer),
-      gridVbo(QOpenGLBuffer::VertexBuffer)
+      gridVbo(QOpenGLBuffer::VertexBuffer),
+      quadVbo(QOpenGLBuffer::VertexBuffer),
+      blobVbo(QOpenGLBuffer::VertexBuffer)
 {
     setFocusPolicy(Qt::StrongFocus);
     setMinimumHeight(200);
@@ -37,7 +39,11 @@ PointCloudWidget::~PointCloudWidget() {
     vao.destroy();
     gridVbo.destroy();
     gridVao.destroy();
+    quadVbo.destroy();
+    blobVbo.destroy();
+    blobVao.destroy();
     shaderProgram.removeAllShaders();
+    blobProgram.removeAllShaders();
     doneCurrent();
 }
 
@@ -139,6 +145,84 @@ void PointCloudWidget::initializeGL() {
     gridVbo.release();
 
     glReady = true;
+    initializeBlobs();
+}
+
+void PointCloudWidget::initializeBlobs()
+{
+    // The quad corner (-1..1) is offset from the blob centre in view space, so the disc always faces the viewer
+    blobProgram.addShaderFromSourceCode(QOpenGLShader::Vertex,
+        R"(
+        #version 330 core
+        layout(location = 0) in vec2 aCorner;
+        layout(location = 1) in vec3 aCenter;
+        layout(location = 2) in vec3 aColor;
+        layout(location = 3) in float aRadius;
+
+        uniform mat4 view;
+        uniform mat4 projection;
+
+        out vec2 corner;
+        out vec3 blobColor;
+
+        void main() {
+            vec4 center = view * vec4(aCenter, 1.0);
+            center.xy += aCorner * aRadius;
+            gl_Position = projection * center;
+            corner = aCorner;
+            blobColor = aColor;
+        }
+        )");
+    blobProgram.addShaderFromSourceCode(QOpenGLShader::Fragment,
+        R"(
+        #version 330 core
+        in vec2 corner;
+        in vec3 blobColor;
+        out vec4 FragColor;
+
+        void main() {
+            float r = length(corner);
+            if (r > 1.0) discard;
+            // Translucent fill, so the points of the blob stay visible, with a solid rim
+            float rim = smoothstep(0.90, 0.95, r);
+            FragColor = vec4(blobColor * mix(0.8, 1.15, rim), mix(0.22, 0.95, rim));
+        }
+        )");
+    if (!blobProgram.link()) {
+        qWarning() << "Blob shader link error:" << blobProgram.log();
+        return;
+    }
+
+    blobVao.create();
+    blobVao.bind();
+
+    const GLfloat corners[] = {-1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f};
+    quadVbo.create();
+    quadVbo.bind();
+    quadVbo.allocate(corners, sizeof(corners));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+
+    blobVbo.create();
+    blobVbo.bind();
+    auto instanceAttribute = [this](GLuint location, GLint components, size_t offset) {
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(location, components, GL_FLOAT, GL_FALSE, sizeof(Blob), reinterpret_cast<const void*>(offset));
+        glVertexAttribDivisor(location, 1);
+    };
+    instanceAttribute(1, 3, offsetof(Blob, center));
+    instanceAttribute(2, 3, offsetof(Blob, color));
+    instanceAttribute(3, 1, offsetof(Blob, radius));
+
+    blobVao.release();
+    blobVbo.release();
+    blobsReady = true;
+}
+
+void PointCloudWidget::setBlobs(std::vector<Blob> newBlobs)
+{
+    blobs = std::move(newBlobs);
+    update();
 }
 
 
@@ -200,6 +284,28 @@ void PointCloudWidget::paintGL() {
     }
 
     shaderProgram.release();
+
+    // Blobs: translucent, so drawn back to front (sorted for the current view) without writing depth
+    if (blobsReady && !blobs.empty()) {
+        const QMatrix4x4 view = viewMatrix();
+        std::vector<Blob> sorted = blobs;
+        std::sort(sorted.begin(), sorted.end(), [&view](const Blob& a, const Blob& b) {
+            return view.map(a.center).z() < view.map(b.center).z();
+        });
+        blobVbo.bind();
+        blobVbo.allocate(sorted.data(), static_cast<int>(sorted.size() * sizeof(Blob)));
+        blobVbo.release();
+
+        glDepthMask(GL_FALSE);
+        blobProgram.bind();
+        blobProgram.setUniformValue("view", view);
+        blobProgram.setUniformValue("projection", projection);
+        blobVao.bind();
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(sorted.size()));
+        blobVao.release();
+        blobProgram.release();
+        glDepthMask(GL_TRUE);
+    }
 }
 
 void PointCloudWidget::mousePressEvent(QMouseEvent* event)

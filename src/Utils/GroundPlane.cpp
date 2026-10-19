@@ -143,20 +143,28 @@ GroundPlane fitGroundPlane(const std::vector<vaiop::QtPoint>& cloud, const Groun
     return best;
 }
 
+namespace {
+    // Ground axes: forward = lidar x projected on the plane, left = normal x forward
+    void groundAxes(const GroundPlane& plane, Eigen::Vector3f& forward, Eigen::Vector3f& left)
+    {
+        const Eigen::Vector3f& n = plane.normal;
+        forward = Eigen::Vector3f::UnitX() - n.x() * n;
+        if (forward.norm() < 1e-3f) {
+            forward = Eigen::Vector3f::UnitY() - n.y() * n;
+        }
+        forward.normalize();
+        left = n.cross(forward);
+    }
+}
+
 std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane)
 {
     std::vector<BirdEyePoint> points;
     if (!plane.valid) {
         return points;
     }
-    // Ground axes: forward = lidar x projected on the plane, left = normal x forward
-    const Eigen::Vector3f& n = plane.normal;
-    Eigen::Vector3f forward = Eigen::Vector3f::UnitX() - n.x() * n;
-    if (forward.norm() < 1e-3f) {
-        forward = Eigen::Vector3f::UnitY() - n.y() * n;
-    }
-    forward.normalize();
-    const Eigen::Vector3f left = n.cross(forward);
+    Eigen::Vector3f forward, left;
+    groundAxes(plane, forward, left);
 
     points.reserve(cloud.size());
     for (const vaiop::QtPoint& q : cloud) {
@@ -164,6 +172,23 @@ std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& clo
         points.push_back({forward.dot(p), left.dot(p), plane.height(p), q.color});
     }
     return points;
+}
+
+std::vector<BirdEyeBlob> projectToGround(const std::vector<Blob>& blobs, const GroundPlane& plane)
+{
+    std::vector<BirdEyeBlob> result;
+    if (!plane.valid) {
+        return result;
+    }
+    Eigen::Vector3f forward, left;
+    groundAxes(plane, forward, left);
+
+    result.reserve(blobs.size());
+    for (const Blob& blob : blobs) {
+        const Eigen::Vector3f p(blob.center.x(), blob.center.y(), blob.center.z());
+        result.push_back({forward.dot(p), left.dot(p), plane.height(p), blob.radius, blob.color});
+    }
+    return result;
 }
 
 cv::Mat renderBirdEye(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, const cv::Vec3b& bg)

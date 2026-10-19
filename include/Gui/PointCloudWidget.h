@@ -10,6 +10,7 @@
 #include <QPoint>
 #include <QVector3D>
 #include <Lidar/QtPoint.h>
+#include <Utils/Blobs.h>
 #include <memory>
 #include <vector>
 
@@ -23,6 +24,8 @@ public:
     ~PointCloudWidget();
 
     void setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> newPoints);
+    // Blobs drawn as translucent discs facing the viewer, with their radius in metres; empty = none
+    void setBlobs(std::vector<Blob> newBlobs);
     void resetView();
 
 protected:
@@ -37,6 +40,7 @@ protected:
 
 private:
     void setupVertexArray(QOpenGLVertexArrayObject& vao, QOpenGLBuffer& vbo);
+    void initializeBlobs();
     QMatrix4x4 viewMatrix() const;
 
     bool glReady = false;
@@ -46,6 +50,14 @@ private:
     QOpenGLBuffer gridVbo;
     QOpenGLVertexArrayObject gridVao;
     int gridVertexCount = 0;
+
+    // Blobs: one quad per blob (instanced), turned into a disc in the fragment shader
+    QOpenGLShaderProgram blobProgram;
+    QOpenGLBuffer quadVbo;
+    QOpenGLBuffer blobVbo;
+    QOpenGLVertexArrayObject blobVao;
+    std::vector<Blob> blobs;
+    bool blobsReady = false;
 
     // Points are uploaded to the GPU in paintGL (when the context is current)
     std::shared_ptr<std::vector<vaiop::QtPoint>> points;

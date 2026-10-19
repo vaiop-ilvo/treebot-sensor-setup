@@ -14,7 +14,8 @@ class BirdEyeWidget : public QWidget {
 public:
     explicit BirdEyeWidget(QWidget* parent = nullptr);
 
-    void setPoints(std::vector<BirdEyePoint> points, const GroundPlane& plane);
+    // blobs: circles drawn around the points (blob view), empty = none
+    void setPoints(std::vector<BirdEyePoint> points, const GroundPlane& plane, std::vector<BirdEyeBlob> blobs = {});
     void clear();
     void resetView();
 
@@ -28,6 +29,7 @@ protected:
 
 private:
     std::vector<BirdEyePoint> points;
+    std::vector<BirdEyeBlob> blobs;
     GroundPlane plane;
 
     // View: metres visible from the centre to the nearest widget edge, and the ground position at the centre

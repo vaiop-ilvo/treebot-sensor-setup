@@ -218,7 +218,7 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
-| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the bird's-eye view |
+| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the bird's-eye view, `--blobs 50` to show only the blobs of at least 50 points in it |
 | `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found) |
 | `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
@@ -355,6 +355,8 @@ Segmentation (`Segmenter`, `SegmentationWorker` in `src/Utils/`):
 * Class colours: fixed colours for the common outdoor classes (sky light blue, tree dark green, plant green, grass light green, earth brown, person red, …), generated colours for the others.
 * **Image overlay** (check box in the lidar tile, segmentation mode): the camera tiles show the segmented frames with the class colours on top, instead of the live frames. They come from the same scan as the point cloud, so they update at the segmentation rate (~4 Hz).
 
+* **Blobs** (button in the lidar tile, segmentation mode): connected points of the same class form a blob (points closer than ~0.3 m are connected; the ground plane is left out, as it would connect everything on it). Only the points of the blobs with at least the **minimum blob size** (slider under the view, 5 to 5000 points, logarithmic) are shown, each blob with a translucent circle around it (covering 90% of its points). Raising the slider filters out the smaller blobs; the label next to it shows the threshold and the number of blobs. Works in the 3D and the bird's-eye view, ~2 ms per scan (`findBlobs` in `src/Utils/Blobs.cpp`).
+
 ### Bird's-eye view
 
 The **Bird's-eye view** check box in the lidar tile shows the point cloud from above, projected on the ground (`GroundPlane` in `src/Utils/`, `BirdEyeWidget` in `src/Gui/`). It works with every colour mode; with segmentation it gives a 2D map of the classes around the robot.
@@ -391,6 +393,7 @@ include/, src/
 ├── Utils/Segmenter       Semantic segmentation of an image with an ONNX model (ONNX Runtime)
 ├── Utils/SegmentationWorker Background thread: segments the camera images and colours the point cloud by class
 ├── Utils/GroundPlane     Ground plane fit (RANSAC) and projection of the cloud on it (bird's-eye view)
+├── Utils/Blobs           Blob view: connected points of a class, filtered on their number of points
 ├── Utils/MetaData.hpp    Metadata structs for robot, lidar and cameras
 ├── Gui/                  MainWindow (main app), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
 │                         Recording (reads a recording folder back for the replay),

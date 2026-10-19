@@ -4,6 +4,15 @@
 #include <QStandardItemModel>
 #include <QVBoxLayout>
 
+#include <cmath>
+
+namespace {
+    // Blob view: points of a class closer than this are connected [m] (the OS1-128 points are ~0.2 m apart at 30 m)
+    constexpr float BLOB_LINK_DISTANCE = 0.3f;
+    // Points up to this height above the ground plane are ground, left out of the blobs [m]
+    constexpr float BLOB_GROUND_MARGIN = 0.15f;
+}
+
 LidarWidget::LidarWidget(QWidget* parent)
     : QFrame(parent)
 {
@@ -24,6 +33,16 @@ LidarWidget::LidarWidget(QWidget* parent)
     overlayBox = new QCheckBox("Image overlay", this);
     overlayBox->setToolTip("Show the segmentation classes on the camera images (segmentation mode)");
     header->addTool(overlayBox);
+    blobButton = new QToolButton(this);
+    blobButton->setText("Blobs");
+    blobButton->setCheckable(true);
+    blobButton->setToolTip("Blob view (segmentation mode): connected points of the same class form a blob, shown with a circle around it.\n"
+                           "The slider under the view sets the minimum blob size (points): smaller blobs are filtered out. The ground is left out.");
+    header->addTool(blobButton);
+    connect(blobButton, &QToolButton::toggled, this, [this](bool) {
+        updateViewControls();
+        showCloud();
+    });
     birdEyeBox = new QCheckBox("Bird's-eye view", this);
     birdEyeBox->setToolTip("Project the point cloud on the ground plane (detected in every scan) and show it from above");
     header->addTool(birdEyeBox);
@@ -55,6 +74,27 @@ LidarWidget::LidarWidget(QWidget* parent)
         .arg(Theme::viewportText.name(), Theme::viewport.name()));
     legendLabel->hide();
 
+    // Blob size, shown while the blob view is on
+    blobControls = new QWidget(this);
+    auto* blobLayout = new QHBoxLayout(blobControls);
+    blobLayout->setContentsMargins(0, 0, 0, 0);
+    blobLayout->setSpacing(6);
+    auto* blobTitle = new QLabel("Min. blob size", blobControls);
+    blobTitle->setObjectName("muted");
+    blobSlider = new QSlider(Qt::Horizontal, blobControls);
+    blobSlider->setRange(0, 100);
+    blobSlider->setValue(40);
+    blobSlider->setFixedWidth(160);
+    blobSlider->setToolTip("Minimum number of points in a blob: smaller blobs are filtered out");
+    blobSizeLabel = new QLabel(blobControls);
+    blobSizeLabel->setObjectName("muted");
+    blobSizeLabel->setMinimumWidth(150);
+    blobLayout->addWidget(blobTitle);
+    blobLayout->addWidget(blobSlider);
+    blobLayout->addWidget(blobSizeLabel);
+    connect(blobSlider, &QSlider::valueChanged, this, [this](int) { showCloud(); });
+    updateBlobLabel();
+
     hintLabel = new QLabel(this);
     hintLabel->setObjectName("muted");
     hintLabel->setAlignment(Qt::AlignRight);
@@ -78,6 +118,7 @@ LidarWidget::LidarWidget(QWidget* parent)
     auto* footer = new QHBoxLayout();
     footer->setSpacing(12);
     footer->addWidget(legendLabel, 1);
+    footer->addWidget(blobControls, 0, Qt::AlignBottom);
     footer->addWidget(hintLabel, 0, Qt::AlignRight | Qt::AlignBottom);
     layout->addLayout(footer);
 
@@ -85,23 +126,78 @@ LidarWidget::LidarWidget(QWidget* parent)
 }
 
 void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc) {
+    setPointCloud(std::move(pc), {}, {});
+}
+
+void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc, std::vector<uint8_t> labels,
+                                std::vector<cv::Vec3b> palette) {
     messageLabel->hide();
     lastCloud = std::move(pc);
+    lastLabels = std::move(labels);
+    lastPalette = std::move(palette);
     showCloud();
 }
 
+bool LidarWidget::showingBlobs() const {
+    return blobButton->isChecked() && blobButton->isEnabled() && lastCloud && lastLabels.size() == lastCloud->size();
+}
+
+uint32_t LidarWidget::minBlobPoints() const {
+    // Logarithmic: 5 points at the left end, 5000 at the right end
+    return static_cast<uint32_t>(std::lround(5.0 * std::pow(1000.0, blobSlider->value() / 100.0)));
+}
+
+void LidarWidget::updateBlobLabel() {
+    blobSizeLabel->setText(QString("≥ %1 points · %2 blobs").arg(minBlobPoints()).arg(blobCount));
+}
+
 void LidarWidget::showCloud() {
-    if (!birdEyeBox->isChecked()) {
-        pointCloudWidget->setPointCloud(lastCloud ? lastCloud : std::make_shared<std::vector<vaiop::QtPoint>>());
-        return;
-    }
+    const bool birdEye = birdEyeBox->isChecked();
     if (!lastCloud || lastCloud->empty()) {
+        pointCloudWidget->setPointCloud(std::make_shared<std::vector<vaiop::QtPoint>>());
+        pointCloudWidget->setBlobs({});
         birdEyeWidget->clear();
         return;
     }
-    // ~1 ms for the plane fit and the projection
-    groundPlane = fitGroundPlane(*lastCloud, &groundPlane);
-    birdEyeWidget->setPoints(projectToGround(*lastCloud, groundPlane), groundPlane);
+
+    // ~1 ms for the plane fit; needed by the bird's-eye view and to leave the ground out of the blobs
+    const bool blobView = showingBlobs();
+    if (birdEye || blobView) {
+        groundPlane = fitGroundPlane(*lastCloud, &groundPlane);
+    }
+
+    // The cloud to show: everything, or only the points of the blobs that are large enough
+    std::shared_ptr<std::vector<vaiop::QtPoint>> shown = lastCloud;
+    std::vector<Blob> blobs;
+    if (blobView) {
+        // The ground would connect everything on it into one blob
+        std::vector<uint8_t> include;
+        if (groundPlane.valid) {
+            include.resize(lastCloud->size());
+            for (size_t i = 0; i < lastCloud->size(); ++i) {
+                const QVector3D& p = (*lastCloud)[i].position;
+                include[i] = groundPlane.height(Eigen::Vector3f(p.x(), p.y(), p.z())) > BLOB_GROUND_MARGIN ? 1 : 0;
+            }
+        }
+        BlobResult result = findBlobs(*lastCloud, lastLabels, lastPalette, minBlobPoints(), BLOB_LINK_DISTANCE, include);
+        shown = std::make_shared<std::vector<vaiop::QtPoint>>();
+        shown->reserve(lastCloud->size() / 2);
+        for (size_t i = 0; i < lastCloud->size(); ++i) {
+            if (result.pointBlob[i] >= 0) {
+                shown->push_back((*lastCloud)[i]);
+            }
+        }
+        blobs = std::move(result.blobs);
+    }
+    blobCount = blobs.size();
+    updateBlobLabel();
+
+    if (birdEye) {
+        birdEyeWidget->setPoints(projectToGround(*shown, groundPlane), groundPlane, projectToGround(blobs, groundPlane));
+    } else {
+        pointCloudWidget->setPointCloud(shown);
+        pointCloudWidget->setBlobs(std::move(blobs));
+    }
 }
 
 void LidarWidget::updateViewControls() {
@@ -110,7 +206,10 @@ void LidarWidget::updateViewControls() {
     birdEyeWidget->setVisible(birdEye);
     hintLabel->setText(birdEye ? "drag: pan · scroll: zoom · double-click: reset"
                                : "drag: rotate · right-drag: pan · scroll: zoom · double-click: reset");
-    overlayBox->setEnabled(colorMode() == ColorMode::Segmentation);
+    const bool segmentation = colorMode() == ColorMode::Segmentation;
+    overlayBox->setEnabled(segmentation);
+    blobButton->setEnabled(segmentation);
+    blobControls->setVisible(segmentation && blobButton->isChecked());
 }
 
 bool LidarWidget::imageOverlay() const {
@@ -157,7 +256,9 @@ void LidarWidget::onColorModeChanged(std::function<void(ColorMode)> callback) {
 
 void LidarWidget::showMessage(const QString& text) {
     lastCloud.reset();
+    lastLabels.clear();
     pointCloudWidget->setPointCloud(std::make_shared<std::vector<vaiop::QtPoint>>());
+    pointCloudWidget->setBlobs({});
     birdEyeWidget->clear();
     messageLabel->setText(text);
     messageLabel->show();

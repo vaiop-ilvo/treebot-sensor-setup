@@ -333,7 +333,7 @@ void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
     if (result.tag != segmentationTag || colorMode != ColorMode::Segmentation) {
         return;
     }
-    lidarWidget->setPointCloud(result.cloud);
+    lidarWidget->setPointCloud(result.cloud, result.labels, segmentation->palette());
     if (showingOverlay()) {
         for (size_t i = 0; i < result.overlays.size() && i < cameraWidgets.size(); ++i) {
             const cv::Mat& overlay = result.overlays[i];

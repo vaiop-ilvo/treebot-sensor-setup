@@ -7,6 +7,7 @@
 #include <opencv2/core.hpp>
 
 #include <Lidar/QtPoint.h>
+#include <Utils/Blobs.h>
 
 // Ground plane in the lidar frame: normal . p + d = 0, the normal points up (towards the sensor),
 // so normal . p + d is the height of p above the ground.
@@ -39,6 +40,16 @@ struct BirdEyePoint {
 
 // Projects the cloud on the ground plane
 std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane);
+
+// A blob in the bird's-eye view: its centre projected on the ground plane
+struct BirdEyeBlob {
+    float forward;
+    float left;
+    float height;       // Of the centre above the ground [m]
+    float radius;       // [m]
+    QVector3D color;
+};
+std::vector<BirdEyeBlob> projectToGround(const std::vector<Blob>& blobs, const GroundPlane& plane);
 
 // View of the bird's-eye image
 struct BirdEyeView {

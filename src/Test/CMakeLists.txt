@@ -82,6 +82,7 @@ add_executable(qt_example_lidar "qt_example_lidar.cpp"
   "${SRC_DIR}/Gui/BirdEyeWidget.cpp"
   "${SRC_DIR}/Gui/LidarWidget.cpp"
   "${SRC_DIR}/Gui/MainWindowLidar.cpp"
+  "${SRC_DIR}/Utils/Blobs.cpp"
   "${SRC_DIR}/Utils/GroundPlane.cpp"
   "${SRC_DIR}/Lidar/Ouster.cpp"
   "${SRC_DIR}/Utils/AsyncWriter.cpp"
@@ -167,6 +168,7 @@ target_link_libraries(read_config
 )
 
 add_executable(colorize_cloud "colorize_cloud.cpp"
+  "${SRC_DIR}/Utils/Blobs.cpp"
   "${SRC_DIR}/Utils/GroundPlane.cpp"
   "${SRC_DIR}/Utils/LidarCamera.cpp"
   "${SRC_DIR}/Utils/PointCloudColor.cpp"
