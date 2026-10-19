@@ -72,9 +72,11 @@ Tested on **Ubuntu 24.04** (x86_64). The steps below go from a clean machine to 
 ### 1. Get the code
 
 ```bash
-git clone git@gitlab.ilvo.be:vaiop/sensor-setup-treebot.git
+git clone https://github.com/vaiop-ilvo/treebot-sensor-setup.git sensor-setup-treebot
 cd sensor-setup-treebot
 ```
+
+The folder name `sensor-setup-treebot` is what the calibration project expects next to it (`treebot-calib export` writes `../sensor-setup-treebot/config/calib.json`).
 
 ### 2. System packages
 
