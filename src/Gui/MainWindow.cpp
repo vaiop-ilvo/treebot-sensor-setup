@@ -209,9 +209,12 @@ void MainWindow::onTick()
         startCapture();
     }
 
-    // Finish the rows in trigger order, without blocking the event loop
+    // Finish the rows in trigger order, without blocking the event loop.
+    // Only the newest scan is coloured: an older one would be replaced right away, and colouring every
+    // row of a backlog keeps the event loop busy.
     while (!pending.empty() && captureComplete(pending.front())) {
-        finishCapture(pending.front());
+        const bool newerScan = std::any_of(pending.begin() + 1, pending.end(), [](const PendingCapture& c) { return c.pointCloud != nullptr; });
+        finishCapture(pending.front(), !newerScan);
         pending.pop_front();
     }
 }
@@ -420,7 +423,7 @@ bool MainWindow::captureComplete(const PendingCapture& capture) const
     });
 }
 
-void MainWindow::finishCapture(const PendingCapture& capture)
+void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
 {
     const bool record = capture.record && recordWidget->isRecording();
     std::vector<CameraMetaData> cameraMetaData(cameras.size());
@@ -470,7 +473,7 @@ void MainWindow::finishCapture(const PendingCapture& capture)
         }
     }
 
-    if (capture.pointCloud && colorMode == ColorMode::Rgb) {
+    if (showCloud && capture.pointCloud && colorMode == ColorMode::Rgb) {
         lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
     }
 

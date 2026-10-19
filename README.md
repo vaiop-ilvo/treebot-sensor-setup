@@ -132,11 +132,11 @@ Check that the sensors answer: `ping 192.168.2.11` (cameras .11 to .14) and `pin
 
 ```bash
 mkdir -p build && cd build
-cmake -DCMAKE_BUILD_TYPE=Debug ..
+cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j
 ```
 
-Executables are placed in `build/bin/`. The project uses C++23.
+Executables are placed in `build/bin/`. Without `CMAKE_BUILD_TYPE` the build is Release. Use a separate folder for a Debug build (`mkdir build-debug && cd build-debug && cmake -DCMAKE_BUILD_TYPE=Debug ..`): it is fine for the debugger, but colouring the point cloud with the cameras takes ~0.5 s per scan instead of ~5 ms, too slow for the live view. The project uses C++23.
 
 AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (or `NO_ASAN=0 cmake ..`).
 

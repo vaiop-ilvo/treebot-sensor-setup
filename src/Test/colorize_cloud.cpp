@@ -9,6 +9,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <chrono>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -58,8 +59,10 @@ int main(int argc, char* argv[])
     }
 
     const CameraColorizer colorizer(std::move(calibs));
+    const auto tic = std::chrono::steady_clock::now();
     const size_t nColored = colorizer.colorize(cloud, imagesRGB);
-    std::cout << nColored << " of " << cloud.size() << " points coloured by " << imagesRGB.size() << " camera(s)\n";
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tic).count();
+    std::cout << nColored << " of " << cloud.size() << " points coloured by " << imagesRGB.size() << " camera(s) in " << ms << " ms\n";
 
     pcl::PointCloud<pcl::PointXYZRGB> output;
     output.reserve(cloud.size());

@@ -81,7 +81,8 @@ private:
     bool waitForTrigger();
     void startCapture();
     bool captureComplete(const PendingCapture& capture) const;
-    void finishCapture(const PendingCapture& capture);
+    // showCloud: colour and show the point cloud (RGB mode); false when a newer scan is already waiting
+    void finishCapture(const PendingCapture& capture, bool showCloud);
     void rotateCamera(size_t index);
     void startReplay();
     void stopReplay();

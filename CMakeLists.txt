@@ -3,6 +3,11 @@ project(vaiop-sensor)
 
 set(CMAKE_CXX_STANDARD 23)
 
+# Release unless asked otherwise: the per-point loops (point cloud colouring) are ~100x slower in Debug
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif ()
+
 # Write build/compile_commands.json for IntelliSense / clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
