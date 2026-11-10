@@ -377,9 +377,13 @@ The rosbag formats write a ROS 2 bag (rosbag2, MCAP storage with zstd compressio
 * **View a bag:** `scripts/bag_viewer.py` plays it back with the camera images, the occupancy map (GridMap, class layer), the segmented points from above and the robot state (play/pause, slider, speed; space and ←/→):
 
   ```bash
-  source /opt/ros/jazzy/setup.bash
-  scripts/bag_viewer.py <folder>/rosbag_YYYYMMDD_hhmmss --range 0.5 1.5    # --range: occupancy_map height range
+  python3 -m venv scripts/.venv                                   # once: numpy, OpenCV, PyQt5, PyYAML
+  scripts/.venv/bin/pip install -r scripts/requirements.txt
+  source /opt/ros/jazzy/setup.bash                                # rosbag2_py and rclpy come from ROS 2
+  scripts/.venv/bin/python scripts/bag_viewer.py <folder>/rosbag_YYYYMMDD_hhmmss --range 0.5 1.5   # --range: occupancy_map height range
   ```
+
+  The venv must use the system Python 3.12 (that of ROS 2 Jazzy); `scripts/.venv` is git-ignored. With the apt packages `python3-numpy python3-opencv python3-pyqt5 python3-yaml` the system Python runs it too, without a venv.
 
   It reads the messages on demand, so large bags open in a few seconds. Started from the VS Code (snap) terminal it can fail like the application (see [Using the application](#using-the-application)); run it from a normal terminal then.
 * Check a bag: `source /opt/ros/jazzy/setup.bash && ros2 bag info <folder>/rosbag_…`. `colorize_cloud … --bag <folder>` writes a recorded scan to a bag in the same way, without the sensors.
@@ -508,6 +512,7 @@ include/, src/
 config/                   sensors.json (addresses, colour mode, segmentation model), calib.json (intrinsics / extrinsics)
 scripts/download_models.sh  Downloads ONNX Runtime and the segmentation model(s)
 scripts/bag_viewer.py       Plays back a recorded rosbag: images, occupancy map, segmented points (Python, ROS 2)
+scripts/requirements.txt    Python packages of the scripts (venv in scripts/.venv, git-ignored)
 models/                   Segmentation models (git-ignored, see step 6 of the installation)
 img/                      Images used in this README
 ```
