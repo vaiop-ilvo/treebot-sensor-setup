@@ -264,7 +264,10 @@ Start the application from the repository root (it then finds `config/sensors.js
 ```bash
 ./build/bin/qt_example_full                     # default config
 ./build/bin/qt_example_full my_sensors.json     # another config file
+./build/bin/qt_example_full config/sensors-orchard.json   # orchard setup (see below)
 ```
+
+`config/sensors-orchard.json` is the setup tested in the orchard with young trees on 10 November 2026: starts in segmentation mode, SegFormer-B0 on the GPU, the classes wall/building, plant/tree (with poles), vehicle and person/animal, occupancy map 0.5–1.5 m above the ground. It is `sensors.json` with only `pointcloud_color` changed; git tag `orchard-b0-2026-11-10` marks the code it was tested with. SegFormer-B2 detected the young trees worse than B0 there. The model and ONNX Runtime are not in git: `scripts/download_models.sh --gpu` restores them.
 
 Close it with the window's close button or **Ctrl+C** in the terminal. Do not kill it (`kill -9`): the cameras then stay locked for a few seconds and cannot be opened by the next run.
 

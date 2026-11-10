@@ -1,0 +1,35 @@
+{
+  "lidar": {
+    "ip": "192.168.3.150"
+  },
+  "cameras": [
+    { "name": "cam1", "ip": "192.168.2.14", "rotation": "ccw" },
+    { "name": "cam2", "ip": "192.168.2.13", "rotation": "cw" },
+    { "name": "cam3", "ip": "192.168.2.12", "rotation": "ccw" },
+    { "name": "cam4", "ip": "192.168.2.11", "rotation": "cw" }
+  ],
+  "robot": {
+    "host": "192.168.1.20",
+    "port": 6379
+  },
+  "calibration": "config/calib.json",
+  "pointcloud_color": "segmentation",
+  "segmentation": {
+    "model": "models/segformer-b0-ade",
+    "input_size": 512,
+    "threads": 0,
+    "min_confidence": 0.0,
+    "device": "auto",
+    "ignore_other_classes": true,
+    "merge_classes": {
+      "wall/building": ["wall", "building", "house", "skyscraper", "hovel", "tower"],
+      "plant/tree": ["tree", "plant", "palm", "flower", "pole"],
+      "vehicle": ["car", "truck", "van", "bus", "bicycle", "minibike", "boat", "ship", "airplane"],
+      "person/animal": ["person", "animal"]
+    }
+  },
+  "occupancy_map": {
+    "min_height": 0.5,
+    "max_height": 1.5
+  }
+}
