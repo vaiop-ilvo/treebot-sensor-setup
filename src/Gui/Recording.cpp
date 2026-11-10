@@ -1,5 +1,6 @@
 #include <Gui/Recording.h>
-#include <Lidar/Ouster.h>
+#include <Utils/PlyFile.h>
+#include <Utils/PointCloudColor.h>
 
 #include <QDateTime>
 #include <QDir>
@@ -46,6 +47,26 @@ namespace {
         const QDateTime dateTime = QDateTime::fromString(text, "yyyy-MM-ddTHH:mm:ss.zzz");
         return dateTime.isValid() ? static_cast<uint64_t>(dateTime.toMSecsSinceEpoch()) * 1000 : 0;
     }
+}
+
+std::vector<std::string> folderLogHeader(int nCameras, const std::vector<std::string>& extraRobotKeys)
+{
+    std::vector<std::string> header = {"timestamp", "lidar_ip", "lidar_ts", "lidar_frame_id", "lidar_fps", "lidar_pc_path"};
+    for (int i = 1; i <= nCameras; ++i) {
+        const std::string cam = "cam" + std::to_string(i);
+        for (const char* field : {"_ip", "_ts", "_frame_id", "_fps", "_im_path"}) {
+            header.push_back(cam + field);
+        }
+    }
+    for (const char* field : {"robot_x", "robot_y", "robot_z", "robot_roll", "robot_pitch", "robot_yaw",
+                              "robot_lat", "robot_lon", "robot_gps_fix", "robot_gps_lng_speed",
+                              "robot_odom_lng_speed", "robot_odom_ang_speed"}) {
+        header.push_back(field);
+    }
+    for (const std::string& key : extraRobotKeys) {
+        header.push_back("redis:" + key);
+    }
+    return header;
 }
 
 bool Recording::open(const QString& folder, QString& error)
@@ -198,7 +219,10 @@ RecordedFrame Recording::load(size_t row) const
     const QDir dir(recordFolder);
 
     if (!frame.lidar.pcPath.empty()) {
-        frame.pointCloud = Ouster::loadPLY(dir.filePath(QString::fromStdString(frame.lidar.pcPath)).toStdString());
+        frame.pointCloud = readPly(dir.filePath(QString::fromStdString(frame.lidar.pcPath)).toStdString());
+        if (frame.pointCloud) {
+            colorByDistance(*frame.pointCloud);
+        }
     }
 
     frame.images.resize(frame.cameras.size());

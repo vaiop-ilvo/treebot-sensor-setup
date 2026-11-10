@@ -76,9 +76,6 @@ find_library(REDIS_PLUS_PLUS_LIB redis++)
 # Find Ouster SKD
 find_package(OusterSDK REQUIRED)
 
-# Find Point Cloud Library (PCL)
-cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
-find_package(PCL REQUIRED io)
 find_package(Eigen3 REQUIRED)
 
 # ONNX Runtime (optional): colouring the point cloud with a segmentation model.
@@ -181,7 +178,6 @@ include_directories(
     ${OPENGL_INCLUDE_DIR}
     ${X11_INCLUDE_DIR}
     ${BOOST_INCLUDEDIR}
-    ${PCL_INCLUDE_DIRS}
     ${Eigen3_INCLUDE_DIRS}
 )
 

@@ -42,6 +42,7 @@ private:
         RobotMetaData robot;
         std::shared_ptr<std::vector<vaiop::QtPoint>> pointCloud;  // Coloured with the camera frames when the row completes
         GroundPlane plane;          // Ground plane of the scan, fitted when recording to a rosbag
+        uint64_t cloudStamp = 0;    // Stamp of the scan in the rosbag, 0 when not written
     };
 
     SensorConfig config;
@@ -103,10 +104,10 @@ private:
     // The camera tiles show the segmentation overlays of the worker instead of the camera frames
     bool showingOverlay() const;
     void updateStatus();
-    std::string recordPath(const QString& relative) const;
 
     // Rosbag recording: opened when a recording with a rosbag format starts, closed when it stops
     GroundPlane recordPlane;                      // Ground plane of the recorded scans, smoothed over time
+    uint64_t recordedRows = 0;                    // Rows in the current bag
     void startBag();
     void stopBag();
     // Before segmentation: the worker writes its results to it, so the bag must outlive the worker thread

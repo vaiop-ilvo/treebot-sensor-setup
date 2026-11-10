@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct RobotMetaData {
     bool valid = false; // True when the data was read from Redis
@@ -17,6 +20,8 @@ struct RobotMetaData {
     double gpsLngSpeed = 0.0; // GPS velocity
     double odomLngSpeed = 0.0; // Odometer velocity
     double odomAngSpeed = 0.0; // Odometer angular velocity
+    // The configured Redis keys with their raw value (nullopt when the key does not exist), in the configured order
+    std::vector<std::pair<std::string, std::optional<std::string>>> redis;
 };
 
 

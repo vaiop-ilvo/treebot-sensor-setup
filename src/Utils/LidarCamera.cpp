@@ -147,10 +147,3 @@ CameraCalib loadCameraCalib(const std::string& calibFileName, const std::string&
     return calib;
 }
 
-bool loadCalib(const std::string& calibFileName, const std::string& camName, Eigen::Matrix3d& K, Eigen::Matrix4d& tLidarCam)
-{
-    const CameraCalib calib = loadCameraCalib(calibFileName, camName);
-    K = calib.K;
-    tLidarCam = calib.tLidarCam;
-    return calib.valid;
-}

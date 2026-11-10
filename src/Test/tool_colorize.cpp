@@ -1,6 +1,6 @@
 // Colours a recorded point cloud with recorded camera images, as the main application does in RGB mode,
 // or with the class colours of a segmentation model (segmentation mode) when --model is given.
-// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>] [--bag <folder>]
+// Usage: treebot_tool colorize <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>] [--bag <folder>]
 // The output is a binary PLY with x, y, z, red, green, blue. --bev also fits the ground plane and writes the
 // coloured cloud projected on it (bird's-eye view, forward up, rings every 5 m). With --model, --bev and --blobs, the
 // bird's-eye view shows only the blobs of at least <min points> points, with their circles (as the Blobs button). With --model and
@@ -10,12 +10,11 @@
 #include <Utils/Blobs.h>
 #include <Utils/GroundPlane.h>
 #include <Utils/LidarCamera.h>
+#include <Utils/PlyFile.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Segmenter.h>
 #include <Utils/SensorConfig.h>
 
-#include <pcl/io/ply_io.h>
-#include <pcl/point_types.h>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -25,7 +24,7 @@
 #include <string>
 #include <vector>
 
-int main(int argc, char* argv[])
+int colorizeCommand(int argc, char* argv[])
 {
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>] [--bag <folder>]\n";
@@ -33,16 +32,12 @@ int main(int argc, char* argv[])
     }
     const std::string calibFile = argv[1];
 
-    pcl::PointCloud<pcl::PointXYZ> input;
-    if (pcl::io::loadPLYFile(argv[2], input) != 0) {
+    const auto input = readPly(argv[2]);
+    if (!input) {
         std::cerr << "Cannot read " << argv[2] << "\n";
         return 1;
     }
-    std::vector<vaiop::QtPoint> cloud;
-    cloud.reserve(input.size());
-    for (const pcl::PointXYZ& point : input) {
-        cloud.push_back({QVector3D(point.x, point.y, point.z), QVector3D()});
-    }
+    std::vector<vaiop::QtPoint> cloud = *input;
 
     std::vector<CameraCalib> calibs;
     std::vector<cv::Mat> imagesRGB;
@@ -224,18 +219,7 @@ int main(int argc, char* argv[])
         std::cout << "Rosbag written to " << bagUri << (bag.dropped() ? " (messages dropped)" : "") << "\n";
     }
 
-    pcl::PointCloud<pcl::PointXYZRGB> output;
-    output.reserve(cloud.size());
-    for (const vaiop::QtPoint& p : cloud) {
-        pcl::PointXYZRGB q(static_cast<uint8_t>(p.color.x() * 255.0f + 0.5f),
-                           static_cast<uint8_t>(p.color.y() * 255.0f + 0.5f),
-                           static_cast<uint8_t>(p.color.z() * 255.0f + 0.5f));
-        q.x = p.position.x();
-        q.y = p.position.y();
-        q.z = p.position.z();
-        output.push_back(q);
-    }
-    if (pcl::io::savePLYFileBinary(argv[3], output) != 0) {
+    if (!writePly(argv[3], cloud, true)) {
         std::cerr << "Cannot write " << argv[3] << "\n";
         return 1;
     }

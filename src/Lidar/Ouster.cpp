@@ -1,5 +1,4 @@
 #include <Lidar/Ouster.h>
-#include <Utils/AsyncWriter.h>
 #include <Utils/PointCloudColor.h>
 #include <QDebug>
 #include <QString>
@@ -116,15 +115,10 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> Ouster::getPointCloud()
     // First compute a point cloud using the lookup table
     auto ousterCloud = ouster::sdk::core::cartesian(*scan_, xyz_lut_);
     auto qCloud = std::make_shared<std::vector<vaiop::QtPoint>>();
-    auto newPclCloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-
     const Eigen::Index nPoints = ousterCloud.rows();
     qCloud->reserve(nPoints);
-    newPclCloud->reserve(nPoints);
-    eigenCloud.resize(nPoints, 4);
 
     // write each point, filtering out points without returns
-    Eigen::Index nValid = 0;
     for (Eigen::Index i = 0; i < nPoints; i++) {
         auto xyz = ousterCloud.row(i);
         if (xyz.isApproxToConstant(0.0)) {
@@ -135,49 +129,13 @@ std::shared_ptr<std::vector<vaiop::QtPoint>> Ouster::getPointCloud()
         const float y = static_cast<float>(xyz.y());
         const float z = static_cast<float>(xyz.z());
 
-        // Populate Qt cloud
         vaiop::QtPoint p;
         p.position = QVector3D(x, y, z);
         qCloud->push_back(p);
-
-        // Populate PCL cloud
-        newPclCloud->push_back(pcl::PointXYZ(x, y, z));
-
-        // Populate Eigen matrix
-        eigenCloud.row(nValid) << xyz.x(), xyz.y(), xyz.z(), 1.0;
-        nValid++;
     }
-    eigenCloud.conservativeResize(nValid, 4);
-    pclCloud = newPclCloud;
     colorByDistance(*qCloud);
 
     return qCloud;
-}
-
-std::shared_ptr<cv::Mat> Ouster::getReflectivityImage()
-{
-    if (!scan_) return nullptr;
-
-    // Get the raw (staggered) reflectivity data
-    const auto& reflectivityStaggered = scan_->field<uint8_t>(ouster::sdk::core::ChanField::REFLECTIVITY);
-
-    // Destagger
-    auto reflectivityDestaggered = ouster::sdk::core::destagger<uint8_t>(reflectivityStaggered, info_.format.pixel_shift_by_row);
-
-    // Wrap as 8-bit single-channel image and deep copy: the Eigen buffer is freed when this function returns
-    cv::Mat view(
-        static_cast<int>(reflectivityDestaggered.rows()),
-        static_cast<int>(reflectivityDestaggered.cols()),
-        CV_8UC1,
-        reflectivityDestaggered.data()
-    );
-
-    return std::make_shared<cv::Mat>(view.clone());
-}
-
-const Eigen::MatrixXd& Ouster::getEigenCloud() const
-{
-    return eigenCloud;
 }
 
 const std::string& Ouster::getIp() const
@@ -212,39 +170,4 @@ void Ouster::getMetaData(OusterMetaData& metaData) const
     metaData.ts = getTimeStamp();
     metaData.fps = fps;
     metaData.ip = ip;
-}
-
-
-bool Ouster::savePLY(const std::string& fileName) const
-{
-    if (!pclCloud) {
-        std::cout << "No point cloud available to save (call getPointCloud first)." << std::endl;
-        return false;
-    }
-
-    // The cloud is replaced (not modified) by getPointCloud, so sharing it with the writer is safe
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud = pclCloud;
-    return AsyncWriter::instance().enqueue([fileName, cloud]() {
-        if (pcl::io::savePLYFileBinary(fileName, *cloud) != 0) {
-            std::cerr << "Failed to write " << fileName << std::endl;
-        }
-    });
-}
-
-std::shared_ptr<std::vector<vaiop::QtPoint>> Ouster::loadPLY(const std::string& fileName)
-{
-    pcl::PointCloud<pcl::PointXYZ> cloud;
-    if (pcl::io::loadPLYFile(fileName, cloud) != 0) {
-        return nullptr;
-    }
-
-    auto qCloud = std::make_shared<std::vector<vaiop::QtPoint>>();
-    qCloud->reserve(cloud.size());
-    for (const pcl::PointXYZ& point : cloud) {
-        vaiop::QtPoint p;
-        p.position = QVector3D(point.x, point.y, point.z);
-        qCloud->push_back(p);
-    }
-    colorByDistance(*qCloud);
-    return qCloud;
 }

@@ -1,44 +1,15 @@
 #include <Gui/RecordWidget.h>
 #include <Gui/Theme.h>
-#include <QDateTime>
-#include <QDebug>
 #include <QDir>
 #include <QFileDialog>
-#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QMessageBox>
-#include <QStandardItemModel>
 #include <QVBoxLayout>
 
-namespace {
-    QString toIsoTime(uint64_t tsMicro)
-    {
-        return QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(tsMicro / 1000)).toString("yyyy-MM-ddTHH:mm:ss.zzz");
-    }
-
-    QString number(double value)
-    {
-        return QString::number(value, 'g', 17);
-    }
-
-    // Quote a CSV field when needed
-    QString csvField(const QString& value)
-    {
-        if (value.contains(',') || value.contains('"') || value.contains('\n')) {
-            QString escaped = value;
-            escaped.replace("\"", "\"\"");
-            return "\"" + escaped + "\"";
-        }
-        return value;
-    }
-}
-
-RecordWidget::RecordWidget(QWidget* parent, int nCameras)
+RecordWidget::RecordWidget(QWidget* parent)
     : QFrame(parent)
-    , nCameras(nCameras)
 {
     setupUI();
-    setupCsvHeader();
 
     connect(recordButton, &QPushButton::clicked, this, &RecordWidget::onRecordClicked);
     connect(stopButton, &QPushButton::clicked, this, &RecordWidget::onStopClicked);
@@ -47,11 +18,6 @@ RecordWidget::RecordWidget(QWidget* parent, int nCameras)
     connect(&statusTimer, &QTimer::timeout, this, &RecordWidget::updateStatus);
     statusTimer.start(500);
     updateStatus();
-}
-
-RecordWidget::~RecordWidget()
-{
-    closeLog();
 }
 
 bool RecordWidget::isRecording() const
@@ -64,60 +30,16 @@ QString RecordWidget::folder() const
     return recordFolderName;
 }
 
-uint64_t RecordWidget::rowCount() const
+void RecordWidget::setRowCount(uint64_t newRows)
 {
-    return rows;
+    rows = newRows;
 }
 
-bool RecordWidget::savesFiles() const
+void RecordWidget::setRecordingAvailable(bool isAvailable, const QString& reason)
 {
-    return formatBox->currentData().toString() != "rosbag";
-}
-
-bool RecordWidget::savesBag() const
-{
-    return formatBox->currentData().toString() != "folder";
-}
-
-void RecordWidget::setFormat(const QString& format)
-{
-    const int index = formatBox->findData(format);
-    if (index >= 0) {
-        formatBox->setCurrentIndex(index);
-    }
-}
-
-void RecordWidget::setBagAvailable(bool available, const QString& reason)
-{
-    auto* model = qobject_cast<QStandardItemModel*>(formatBox->model());
-    for (const char* format : {"rosbag", "both"}) {
-        const int index = formatBox->findData(format);
-        if (model && index >= 0) {
-            model->item(index)->setEnabled(available);
-            if (!available) {
-                formatBox->setItemData(index, reason, Qt::ToolTipRole);
-            }
-        }
-    }
-    if (!available && savesBag()) {
-        setFormat("folder");
-    }
-}
-
-void RecordWidget::setupCsvHeader()
-{
-    csvHeader = {"timestamp", "lidar_ip", "lidar_ts", "lidar_frame_id", "lidar_fps", "lidar_pc_path"};
-    for (int i = 1; i <= nCameras; ++i) {
-        const std::string cam = "cam" + std::to_string(i);
-        for (const char* field : {"_ip", "_ts", "_frame_id", "_fps", "_im_path"}) {
-            csvHeader.push_back(cam + field);
-        }
-    }
-    for (const char* field : {"robot_x", "robot_y", "robot_z", "robot_roll", "robot_pitch", "robot_yaw",
-                              "robot_lat", "robot_lon", "robot_gps_fix", "robot_gps_lng_speed",
-                              "robot_odom_lng_speed", "robot_odom_ang_speed"}) {
-        csvHeader.push_back(field);
-    }
+    available = isAvailable;
+    recordButton->setEnabled(available && !recording && !recordFolderName.isEmpty());
+    recordButton->setToolTip(available ? "Start recording a rosbag in the folder" : reason);
 }
 
 void RecordWidget::setupUI() {
@@ -127,12 +49,12 @@ void RecordWidget::setupUI() {
     title->setObjectName("cardTitle");
 
     folderButton = new QPushButton("Folder…", this);
-    folderButton->setToolTip("Select the output folder");
+    folderButton->setToolTip("Select the output folder: every recording is a rosbag_YYYYMMDD_hhmmss folder in it");
     folderButton->setCursor(Qt::PointingHandCursor);
 
     recordButton = new QPushButton("●  Record", this);
     recordButton->setObjectName("recordButton");
-    recordButton->setToolTip("Start recording");
+    recordButton->setToolTip("Start recording a rosbag in the folder");
     recordButton->setCursor(Qt::PointingHandCursor);
     recordButton->setEnabled(false);
 
@@ -141,18 +63,8 @@ void RecordWidget::setupUI() {
     stopButton->setCursor(Qt::PointingHandCursor);
     stopButton->setEnabled(false);
 
-    formatBox = new QComboBox(this);
-    formatBox->addItem("Folder", "folder");
-    formatBox->addItem("Rosbag", "rosbag");
-    formatBox->addItem("Folder + rosbag", "both");
-    formatBox->setItemData(0, "Images (PNG) and point clouds (PLY) as files in the folder, with the CSV log", Qt::ToolTipRole);
-    formatBox->setItemData(1, "A ROS 2 bag (MCAP) in the folder: point clouds, images, robot state, transforms and the\n"
-                              "occupancy map. Only the CSV log is written next to it", Qt::ToolTipRole);
-    formatBox->setItemData(2, "The files and a ROS 2 bag, from the same rows", Qt::ToolTipRole);
-    formatBox->setToolTip("What to record");
-
     replayButton = new QPushButton("Replay…", this);
-    replayButton->setToolTip("Open a recording and play it back");
+    replayButton->setToolTip("Open a recording folder and play it back (a rosbag: convert it with scripts/bag_to_folder.py)");
     replayButton->setCursor(Qt::PointingHandCursor);
 
     folderLabel = new QLabel("No folder selected", this);
@@ -178,7 +90,6 @@ void RecordWidget::setupUI() {
     auto* buttonRow = new QHBoxLayout();
     buttonRow->setSpacing(6);
     buttonRow->addWidget(folderButton);
-    buttonRow->addWidget(formatBox);
     buttonRow->addWidget(recordButton);
     buttonRow->addWidget(stopButton);
     buttonRow->addWidget(folderLabel, 1);
@@ -205,7 +116,7 @@ void RecordWidget::updateStatus()
         recDot->setStyleSheet(QString("background: %1; border-radius: 5px;")
             .arg(blink ? Theme::error.name() : Theme::panel.name()));
     } else {
-        statusLabel->setText(recordFolderName.isEmpty() ? "IDLE" : QString("READY · %1 rows").arg(rows));
+        statusLabel->setText(recordFolderName.isEmpty() ? "IDLE" : QString("READY · last: %1 rows").arg(rows));
         statusLabel->setStyleSheet(QString("color: %1;").arg(Theme::textMuted.name()));
         recDot->setStyleSheet(QString("background: %1; border-radius: 5px;").arg(Theme::textMuted.name()));
     }
@@ -218,91 +129,32 @@ void RecordWidget::updateStatus()
 }
 
 void RecordWidget::onRecordClicked() {
-    if (!logFile.isOpen() && !logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        QMessageBox::warning(this, "Recording", QString("Could not open the log file:\n%1\n\n%2")
-            .arg(logFile.fileName(), logFile.errorString()));
-        return;
-    }
-    stream.setDevice(&logFile);
-
     recording = true;
+    rows = 0;
     elapsed.start();
     recordButton->setEnabled(false);
     stopButton->setEnabled(true);
     folderButton->setEnabled(false);    // Never switch folders in the middle of a recording
-    formatBox->setEnabled(false);
     replayButton->setEnabled(false);
     updateStatus();
     emit recordingChanged(true);
 }
 
 void RecordWidget::onStopClicked() {
+    stop();
+}
+
+void RecordWidget::stop() {
+    if (!recording) {
+        return;
+    }
     recording = false;
-    closeLog();
-    recordButton->setEnabled(true);
+    recordButton->setEnabled(available);
     stopButton->setEnabled(false);
     folderButton->setEnabled(true);
-    formatBox->setEnabled(true);
     replayButton->setEnabled(true);
     updateStatus();
-    qDebug() << "Recording stopped. Log file closed.";
     emit recordingChanged(false);
-}
-
-void RecordWidget::closeLog()
-{
-    if (logFile.isOpen()) {
-        // Flush the text stream first, QFile::close does not know about its buffer
-        stream.flush();
-        logFile.close();
-    }
-}
-
-bool RecordWidget::prepareFolder(const QString& selectedFolder)
-{
-    QString folderName = selectedFolder;
-
-    // Only create numbered version if folder exists AND is not empty
-    QDir recordDir(folderName);
-    for (int index = 1; recordDir.exists() && !recordDir.isEmpty(); ++index) {
-        folderName = selectedFolder + "_" + QString::number(index);
-        recordDir.setPath(folderName);
-    }
-
-    // Create the folder and the sub directories
-    QStringList subdirs;
-    for (int i = 1; i <= nCameras; ++i) {
-        subdirs << QString("cam%1").arg(i);
-    }
-    subdirs << "lidar";
-    for (const QString& subdir : subdirs) {
-        if (!recordDir.mkpath(subdir)) {
-            QMessageBox::warning(this, "Recording", QString("Could not create folder:\n%1").arg(recordDir.filePath(subdir)));
-            return false;
-        }
-    }
-
-    // Create logging file
-    const QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
-    logFile.setFileName(recordDir.filePath("sensor_log_" + timestamp + ".csv"));
-    if (!logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        QMessageBox::warning(this, "Recording", QString("Could not create the log file:\n%1\n\n%2")
-            .arg(logFile.fileName(), logFile.errorString()));
-        return false;
-    }
-    stream.setDevice(&logFile);
-
-    // Write header
-    QStringList header;
-    for (const std::string& name : csvHeader) {
-        header << QString::fromStdString(name);
-    }
-    stream << header.join(',') << "\n";
-    stream.flush();
-
-    recordFolderName = recordDir.absolutePath();
-    rows = 0;
-    return true;
 }
 
 void RecordWidget::onFolderClicked() {
@@ -315,89 +167,20 @@ void RecordWidget::onFolderClicked() {
     dialog.setOption(QFileDialog::ShowDirsOnly);
     dialog.setOption(QFileDialog::DontUseNativeDialog); // Otherwise it does not show up
     if (!recordFolderName.isEmpty()) {
-        QDir parent(recordFolderName);
-        parent.cdUp();
-        dialog.setDirectory(parent);
+        dialog.setDirectory(recordFolderName);
     }
-
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
         return;
     }
 
-    // Close the previous log before switching to the new folder
-    closeLog();
-    if (!prepareFolder(dialog.selectedFiles().first())) {
-        recordFolderName.clear();
-        folderLabel->setText("No folder selected");
-        recordButton->setEnabled(false);
-        updateStatus();
+    const QString selected = dialog.selectedFiles().first();
+    if (!QDir().mkpath(selected)) {
+        QMessageBox::warning(this, "Recording", QString("Could not create folder:\n%1").arg(selected));
         return;
     }
-
-    // Activate start recording button
-    recordButton->setEnabled(true);
+    recordFolderName = QDir(selected).absolutePath();
+    rows = 0;
+    recordButton->setEnabled(available);
     stopButton->setEnabled(false);
     updateStatus();
-    emit folderChanged(recordFolderName);
-}
-
-void RecordWidget::logData(const RobotMetaData& robotMetaData,
-                const std::vector<CameraMetaData>& cameraMetaData,
-                const OusterMetaData& lidarMetaData)
-{
-    if (!recording || !logFile.isOpen()) {
-        return;
-    }
-
-    QStringList row;
-    row.reserve(static_cast<int>(csvHeader.size()));
-
-    // Timestamp
-    row << QDateTime::currentDateTime().toString("yyyy-MM-ddTHH:mm:ss.zzz");
-
-    // Lidar metadata
-    if (lidarMetaData.valid) {
-        row << QString::fromStdString(lidarMetaData.ip)
-            << toIsoTime(lidarMetaData.ts)
-            << QString::number(lidarMetaData.frameId)
-            << QString::number(lidarMetaData.fps)
-            << csvField(QString::fromStdString(lidarMetaData.pcPath));
-    } else {
-        row << QString::fromStdString(lidarMetaData.ip) << "" << "" << "" << "";
-    }
-
-    // Camera metadata, empty cells for cameras without a new frame
-    for (int i = 0; i < nCameras; ++i) {
-        if (i < static_cast<int>(cameraMetaData.size()) && cameraMetaData[i].valid) {
-            const CameraMetaData& cam = cameraMetaData[i];
-            row << QString::fromStdString(cam.ip)
-                << toIsoTime(cam.ts)
-                << QString::number(cam.frameId)
-                << QString::number(cam.fps)
-                << csvField(QString::fromStdString(cam.imPath));
-        } else {
-            const QString ip = i < static_cast<int>(cameraMetaData.size()) ? QString::fromStdString(cameraMetaData[i].ip) : "";
-            row << ip << "" << "" << "" << "";
-        }
-    }
-
-    // Robot metadata
-    if (robotMetaData.valid) {
-        row << number(robotMetaData.x) << number(robotMetaData.y) << number(robotMetaData.z)
-            << number(robotMetaData.roll) << number(robotMetaData.pitch) << number(robotMetaData.yaw)
-            << number(robotMetaData.lat) << number(robotMetaData.lon)
-            << QString::number(robotMetaData.gpsFix)
-            << number(robotMetaData.gpsLngSpeed)
-            << number(robotMetaData.odomLngSpeed)
-            << number(robotMetaData.odomAngSpeed);
-    } else {
-        for (int i = 0; i < 12; ++i) {
-            row << "";
-        }
-    }
-
-    // Write and flush every row, so nothing is lost when the application stops unexpectedly
-    stream << row.join(',') << "\n";
-    stream.flush();
-    rows++;
 }

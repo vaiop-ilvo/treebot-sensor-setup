@@ -31,6 +31,8 @@
 //   /occupancy_map/class_names     std_msgs/String               JSON {"class id": "name"} of the class layer
 //   /robot/odom                    nav_msgs/Odometry             odom -> base_link, from the robot state (Redis)
 //   /robot/gnss                    sensor_msgs/NavSatFix
+//   /record/info                   std_msgs/String               once: JSON with the CSV name and header of the recording
+//   /record/row                    std_msgs/String               per row: JSON with everything of one CSV row (scripts/bag_to_folder.py)
 class BagWriter {
 public:
     BagWriter();
@@ -65,6 +67,9 @@ public:
     // A camera frame (RGB): /camN/image/compressed and /camN/camera_info (camera = index, cam1 = 0)
     void writeImage(size_t camera, uint64_t stampUs, const cv::Mat& imageRGB);
     void writeRobot(uint64_t stampUs, const RobotMetaData& robot);
+    // JSON documents of /record/info and /record/row
+    void writeRecordInfo(uint64_t stampUs, std::string json);
+    void writeRow(uint64_t stampUs, std::string json);
 
 private:
     struct Impl;

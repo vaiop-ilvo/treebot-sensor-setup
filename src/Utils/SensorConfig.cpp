@@ -54,6 +54,15 @@ namespace {
     }
 }
 
+std::vector<RedisKey> SensorConfig::defaultRobotKeys()
+{
+    return {{"pc.gps.fix", false},
+            {"pc.gps.ground_speed", false},
+            {"plc.monitor.navigation.velocity.longitudinal", false},
+            {"plc.monitor.navigation.velocity.angular", false},
+            {"gps.ref.state", true}};
+}
+
 SensorConfig SensorConfig::defaults()
 {
     SensorConfig config;
@@ -122,7 +131,6 @@ SensorConfig SensorConfig::load(const std::string& path)
     config.occupancyMap.maxHeight = static_cast<float>(occupancy["max_height"].toDouble(config.occupancyMap.maxHeight));
     config.occupancyMap.cellSize = static_cast<float>(occupancy["cell_size"].toDouble(config.occupancyMap.cellSize));
     config.occupancyMap.size = static_cast<float>(occupancy["size"].toDouble(config.occupancyMap.size));
-    config.recordFormat = root["record_format"].toString(QString::fromStdString(config.recordFormat)).toStdString();
 
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();
@@ -130,6 +138,22 @@ SensorConfig SensorConfig::load(const std::string& path)
     const QJsonObject robot = root["robot"].toObject();
     config.robotHost = robot["host"].toString(QString::fromStdString(config.robotHost)).toStdString();
     config.robotPort = robot["port"].toInt(config.robotPort);
+    // "keys": ["plain.key", {"key": "json.key", "type": "json"}, ...]
+    if (robot.contains("keys")) {
+        config.robotKeys.clear();
+        for (const QJsonValue& value : robot["keys"].toArray()) {
+            RedisKey key;
+            if (value.isObject()) {
+                key.key = value.toObject()["key"].toString().toStdString();
+                key.json = value.toObject()["type"].toString() == "json";
+            } else {
+                key.key = value.toString().toStdString();
+            }
+            if (!key.key.empty()) {
+                config.robotKeys.push_back(key);
+            }
+        }
+    }
 
     if (root.contains("cameras")) {
         config.cameras.clear();

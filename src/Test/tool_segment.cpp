@@ -1,5 +1,5 @@
 // Segments camera images with the segmentation model, as the main application does in segmentation mode.
-// Usage: segment_image <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N] [--device auto|gpu|cpu]
+// Usage: treebot_tool segment <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N] [--device auto|gpu|cpu]
 // Writes <out dir>/<image name>_seg.png: the image with the class colours on top, and prints the classes found.
 // With several images it also times them all in one call, as the application segments the cameras of a scan.
 #include <Utils/Segmenter.h>
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-int main(int argc, char* argv[])
+int segmentCommand(int argc, char* argv[])
 {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N] [--device auto|gpu|cpu]\n";

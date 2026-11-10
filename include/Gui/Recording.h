@@ -4,6 +4,7 @@
 #include <QString>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <Lidar/QtPoint.h>
@@ -19,7 +20,11 @@ struct RecordedFrame {
     RobotMetaData robot;
 };
 
-// A recording folder written by RecordWidget: the sensor_log_*.csv plus the lidar/ and camN/ files it refers to
+// Columns of the CSV log of a recording folder: timestamp, lidar_*, camN_*, robot_* and redis:<key> for the extra
+// Redis keys. Recordings are rosbags now; scripts/bag_to_folder.py writes this format from the header in /record/info.
+std::vector<std::string> folderLogHeader(int nCameras, const std::vector<std::string>& extraRobotKeys);
+
+// A recording folder (scripts/bag_to_folder.py, or the folder recording of older versions): the sensor_log_*.csv plus the lidar/ and camN/ files it refers to
 class Recording {
 public:
     // Reads the log of the folder. Returns false and sets error when the folder holds no readable recording.

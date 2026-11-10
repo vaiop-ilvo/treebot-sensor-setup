@@ -11,6 +11,12 @@ struct CameraInfo {
     std::string calibFileName;
 };
 
+// A Redis key of the robot state that is read and recorded: with GET, or JSON.GET (RedisJSON) when json is true
+struct RedisKey {
+    std::string key;
+    bool json = false;
+};
+
 // Settings of the segmentation model (the "segmentation" block of sensors.json)
 struct SegmentationConfig {
     std::string modelDir;       // Folder with model.onnx and config.json (id2label), empty = no model
@@ -38,11 +44,14 @@ struct SensorConfig {
     std::vector<CameraInfo> cameras;
     std::string robotHost = "192.168.1.20";
     int robotPort = 6379;
+    // Redis keys read at 10 Hz and recorded with every row ("keys" in the "robot" block); the ones the application
+    // knows (gps fix, speeds, gps.ref.state) are also shown and written as Odometry/NavSatFix
+    std::vector<RedisKey> robotKeys = defaultRobotKeys();
+    static std::vector<RedisKey> defaultRobotKeys();
     std::string calibFileName = "config/calib.json";
     std::string pointCloudColor = "distance";  // Initial point cloud colouring: distance, rgb or segmentation
     SegmentationConfig segmentation;
     OccupancyMapConfig occupancyMap;
-    std::string recordFormat = "folder";    // Initial recording format: folder, rosbag or both
     std::string sourceFile;     // File the config was read from, empty when the defaults are used
 
     // The rig defaults (used when no config file is found)

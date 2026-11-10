@@ -569,6 +569,24 @@ void BagWriter::writeRobot(uint64_t stampUs, const RobotMetaData& robot)
     });
 }
 
+void BagWriter::writeRecordInfo(uint64_t stampUs, std::string json)
+{
+    impl->enqueue([this, stampUs, json = std::move(json)]() {
+        std_msgs::msg::String msg;
+        msg.data = json;
+        impl->write(msg, "/record/info", stampUs);
+    });
+}
+
+void BagWriter::writeRow(uint64_t stampUs, std::string json)
+{
+    impl->enqueue([this, stampUs, json = std::move(json)]() {
+        std_msgs::msg::String msg;
+        msg.data = json;
+        impl->write(msg, "/record/row", stampUs);
+    });
+}
+
 #else   // Without ROS 2
 
 struct BagWriter::Impl {};
@@ -594,5 +612,7 @@ void BagWriter::writeSegmentedScan(uint64_t, std::shared_ptr<const std::vector<v
                                    const GroundPlane&, const OccupancyMapConfig&) {}
 void BagWriter::writeImage(size_t, uint64_t, const cv::Mat&) {}
 void BagWriter::writeRobot(uint64_t, const RobotMetaData&) {}
+void BagWriter::writeRecordInfo(uint64_t, std::string) {}
+void BagWriter::writeRow(uint64_t, std::string) {}
 
 #endif

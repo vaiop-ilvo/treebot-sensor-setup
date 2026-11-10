@@ -1,9 +1,11 @@
 #include <Gui/MainWindow.h>
 #include <Gui/Theme.h>
-#include <Utils/AsyncWriter.h>
 
 #include <QApplication>
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMessageBox>
 #include <QDebug>
 #include <QFileInfo>
@@ -19,6 +21,48 @@ namespace {
     uint64_t hostTimeMicros()
     {
         return std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now()).time_since_epoch().count();
+    }
+
+    // The configured Redis keys that the application does not know: extra CSV columns
+    std::vector<std::string> extraRobotKeys(const std::vector<RedisKey>& keys)
+    {
+        const std::vector<RedisKey> known = SensorConfig::defaultRobotKeys();
+        std::vector<std::string> extra;
+        for (const RedisKey& key : keys) {
+            if (std::none_of(known.begin(), known.end(), [&key](const RedisKey& k) { return k.key == key.key; })) {
+                extra.push_back(key.key);
+            }
+        }
+        return extra;
+    }
+
+    // /record/row: everything of one CSV row, so scripts/bag_to_folder.py can write the folder format from the bag.
+    // cloudStamp / imageStamps: stamps of the messages in the bag, 0 when not written.
+    std::string rowJson(uint64_t row, const QString& logTime, uint64_t triggerTs, const OusterMetaData& lidar, uint64_t cloudStamp,
+                        const std::vector<CameraMetaData>& cameras, const std::vector<uint64_t>& imageStamps,
+                        const RobotMetaData& robot)
+    {
+        auto stamp = [](uint64_t us) { return us ? QJsonValue(static_cast<double>(us)) : QJsonValue(); };
+        QJsonObject lidarJson{{"valid", lidar.valid}, {"ip", QString::fromStdString(lidar.ip)}, {"ts", static_cast<double>(lidar.ts)},
+                              {"frame_id", static_cast<double>(lidar.frameId)}, {"fps", lidar.fps}, {"cloud_stamp", stamp(cloudStamp)}};
+        QJsonArray camerasJson;
+        for (size_t i = 0; i < cameras.size(); ++i) {
+            const CameraMetaData& cam = cameras[i];
+            camerasJson.append(QJsonObject{{"valid", cam.valid}, {"ip", QString::fromStdString(cam.ip)}, {"ts", static_cast<double>(cam.ts)},
+                                           {"frame_id", static_cast<double>(cam.frameId)}, {"fps", cam.fps},
+                                           {"image_stamp", stamp(i < imageStamps.size() ? imageStamps[i] : 0)}});
+        }
+        QJsonObject redis;
+        for (const auto& [key, raw] : robot.redis) {
+            redis.insert(QString::fromStdString(key), raw ? QJsonValue(QString::fromStdString(*raw)) : QJsonValue());
+        }
+        const QJsonObject robotJson{{"valid", robot.valid}, {"x", robot.x}, {"y", robot.y}, {"z", robot.z}, {"roll", robot.roll},
+                                    {"pitch", robot.pitch}, {"yaw", robot.yaw}, {"lat", robot.lat}, {"lon", robot.lon},
+                                    {"gps_fix", robot.gpsFix}, {"gps_lng_speed", robot.gpsLngSpeed},
+                                    {"odom_lng_speed", robot.odomLngSpeed}, {"odom_ang_speed", robot.odomAngSpeed}, {"redis", redis}};
+        const QJsonObject json{{"row", static_cast<double>(row)}, {"log_time", logTime}, {"trigger_ts", static_cast<double>(triggerTs)},
+                               {"lidar", lidarJson}, {"cameras", camerasJson}, {"robot", robotJson}};
+        return QJsonDocument(json).toJson(QJsonDocument::Compact).toStdString();
     }
 }
 
@@ -102,14 +146,13 @@ void MainWindow::setupUI()
     titleBox->addWidget(appSubtitle);
     titleBox->addStretch();
 
-    recordWidget = new RecordWidget(central, static_cast<int>(config.cameras.size()));
+    recordWidget = new RecordWidget(central);
     replayWidget = new ReplayWidget(central);
     headerStack = new QStackedWidget(central);
     headerStack->addWidget(recordWidget);
     headerStack->addWidget(replayWidget);
     connect(recordWidget, &RecordWidget::replayRequested, this, [this]() { startReplay(); });
-    recordWidget->setBagAvailable(BagWriter::isAvailable(), "Built without ROS 2 (/opt/ros/jazzy): no rosbag recording");
-    recordWidget->setFormat(QString::fromStdString(config.recordFormat));
+    recordWidget->setRecordingAvailable(BagWriter::isAvailable(), "Built without ROS 2 (/opt/ros/jazzy): no recording");
     connect(recordWidget, &RecordWidget::recordingChanged, this, [this](bool recording) {
         if (recording) {
             startBag();
@@ -194,7 +237,7 @@ void MainWindow::setupUI()
 void MainWindow::connectSensors()
 {
     // Robot (polled in the background, never blocks the GUI)
-    robotPtr = std::make_unique<ArtofRobot>(config.robotHost, config.robotPort);
+    robotPtr = std::make_unique<ArtofRobot>(config.robotHost, config.robotPort, config.robotKeys);
     robotPtr->startPolling();
 
     // Cameras
@@ -489,19 +532,14 @@ bool MainWindow::waitForTrigger()
     return false;
 }
 
-std::string MainWindow::recordPath(const QString& relative) const
-{
-    return (recordWidget->folder() + "/" + relative).toStdString();
-}
-
 void MainWindow::startCapture()
 {
     PendingCapture capture;
     capture.deadline = std::chrono::steady_clock::now() + MAX_CAMERA_WAIT;
-    capture.record = recordWidget->isRecording();
+    capture.record = recordWidget->isRecording() && bag->isOpen();
     // Rows still waiting for their cameras will take the indices before this one
     const auto pendingRecordRows = std::count_if(pending.begin(), pending.end(), [](const PendingCapture& c) { return c.record; });
-    capture.fileIndex = recordWidget->rowCount() + pendingRecordRows;
+    capture.fileIndex = recordedRows + pendingRecordRows;
 
     // Lidar
     if (lidarPtr) {
@@ -514,12 +552,6 @@ void MainWindow::startCapture()
                 lidarWidget->setPointCloud(pc);
             }
             lidarWidget->setInfo(lidarPtr->getIp(), lidarPtr->getFps(), lidarPtr->getFrameId(), pc->size(), Theme::Status::Ok);
-            if (capture.record && recordWidget->savesFiles()) {
-                const QString relativeFileName = QString("lidar/%1.ply").arg(capture.fileIndex, 6, 10, QChar('0'));
-                if (lidarPtr->savePLY(recordPath(relativeFileName))) {
-                    capture.lidar.pcPath = relativeFileName.toStdString();
-                }
-            }
         }
     } else {
         capture.lidar.ip = config.lidarIp;
@@ -528,7 +560,8 @@ void MainWindow::startCapture()
 
     // Rosbag: the scan, its ground plane and the occupancy map. In segmentation mode the GridMap (with the class
     // layer) is written when the worker has segmented the scan.
-    if (capture.record && capture.pointCloud && bag->isOpen()) {
+    if (capture.record && capture.pointCloud) {
+        capture.cloudStamp = capture.triggerTs;
         recordPlane = fitGroundPlane(*capture.pointCloud, recordPlane.valid ? &recordPlane : nullptr);
         capture.plane = recordPlane;
         const bool segmenting = colorMode == ColorMode::Segmentation && segmentation->isAvailable();
@@ -540,7 +573,7 @@ void MainWindow::startCapture()
         capture.robot = robotPtr->getLatest();
         if (capture.robot.valid) {
             robotWidget->setMetaData(capture.robot);
-            if (capture.record && bag->isOpen()) {
+            if (capture.record) {
                 bag->writeRobot(capture.triggerTs, capture.robot);
             }
         } else {
@@ -566,8 +599,9 @@ bool MainWindow::captureComplete(const PendingCapture& capture) const
 
 void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
 {
-    const bool record = capture.record && recordWidget->isRecording();
+    const bool record = capture.record && recordWidget->isRecording() && bag->isOpen();
     std::vector<CameraMetaData> cameraMetaData(cameras.size());
+    std::vector<uint64_t> imageStamps(cameras.size(), 0);
     std::vector<cv::Mat> imagesRGB(cameras.size());
 
     for (size_t i = 0; i < cameras.size(); i++) {
@@ -609,14 +643,9 @@ void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
 
         camPtr->getMetaData(frame, camMetaData);
         camMetaData.valid = true;
-        if (record && bag->isOpen()) {
+        if (record) {
             bag->writeImage(i, frame.ts, frame.image);
-        }
-        if (record && recordWidget->savesFiles()) {
-            const QString relativeFileName = QString("cam%1/%2.png").arg(i + 1).arg(capture.fileIndex, 6, 10, QChar('0'));
-            if (Daheng::saveFrame(frame, recordPath(relativeFileName))) {
-                camMetaData.imPath = relativeFileName.toStdString();
-            }
+            imageStamps[i] = frame.ts;
         }
     }
 
@@ -625,29 +654,26 @@ void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
             lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
         } else if (colorMode == ColorMode::Segmentation) {
             // The worker keeps only the newest job, so it never falls behind the scans
-            segmentation->submit({segmentationTag, capture.pointCloud, std::move(imagesRGB), capture.triggerTs, capture.plane,
-                                  record && bag->isOpen()});
+            segmentation->submit({segmentationTag, capture.pointCloud, std::move(imagesRGB), capture.triggerTs, capture.plane, record});
         }
     }
 
     if (record) {
-        recordWidget->logData(capture.robot, cameraMetaData, capture.lidar);
+        // The row of the CSV log (scripts/bag_to_folder.py); "timestamp" = when the row is complete
+        const QString logTime = QDateTime::currentDateTime().toString("yyyy-MM-ddTHH:mm:ss.zzz");
+        bag->writeRow(capture.triggerTs, rowJson(capture.fileIndex, logTime, capture.triggerTs, capture.lidar, capture.cloudStamp,
+                                                 cameraMetaData, imageStamps, capture.robot));
+        recordWidget->setRowCount(++recordedRows);
     }
 }
 
 void MainWindow::updateStatus()
 {
-    AsyncWriter& writer = AsyncWriter::instance();
-    const size_t queued = writer.pending();
-    const size_t dropped = writer.dropped();
-    QString text = QString("Write queue: %1").arg(queued);
-    if (dropped > 0) {
-        text += QString(" · <span style='color:%1'>%2 files dropped (disk too slow)</span>").arg(Theme::error.name()).arg(dropped);
-    }
+    QString text;
     if (bag->isOpen()) {
-        text += QString(" · Rosbag queue: %1").arg(bag->pending());
-        if (const size_t bagDropped = bag->dropped(); bagDropped > 0) {
-            text += QString(" · <span style='color:%1'>%2 rosbag messages dropped</span>").arg(Theme::error.name()).arg(bagDropped);
+        text = QString("Rosbag queue: %1").arg(bag->pending());
+        if (const size_t dropped = bag->dropped(); dropped > 0) {
+            text += QString(" · <span style='color:%1'>%2 messages dropped (disk too slow)</span>").arg(Theme::error.name()).arg(dropped);
         }
     }
     writerStatus->setText(text);
@@ -655,17 +681,28 @@ void MainWindow::updateStatus()
 
 void MainWindow::startBag()
 {
-    if (!recordWidget->savesBag()) {
-        return;
-    }
     const QString uri = recordWidget->folder() + "/rosbag_" + QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
     std::string error;
     if (!bag->open(uri.toStdString(), error)) {
         qWarning().noquote() << QString::fromStdString(error);
-        QMessageBox::warning(this, "Rosbag", QString::fromStdString(error) + "\n\nThe recording continues without the rosbag.");
+        QMessageBox::warning(this, "Recording", QString::fromStdString(error));
+        recordWidget->stop();
         return;
     }
+    recordedRows = 0;
     const uint64_t now = hostTimeMicros();
+    // CSV name and header for scripts/bag_to_folder.py: those of this folder's log, or a new name for a bag-only recording
+    QJsonArray header;
+    for (const std::string& column : folderLogHeader(static_cast<int>(config.cameras.size()), extraRobotKeys(config.robotKeys))) {
+        header.append(QString::fromStdString(column));
+    }
+    const QString csvName = "sensor_log_" + QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss") + ".csv";
+    QJsonArray cameraNames;
+    for (const CameraInfo& camera : config.cameras) {
+        cameraNames.append(QString::fromStdString(camera.name));
+    }
+    bag->writeRecordInfo(now, QJsonDocument(QJsonObject{{"format_version", 1}, {"csv_name", csvName}, {"csv_header", header},
+                                                         {"cameras", cameraNames}}).toJson(QJsonDocument::Compact).toStdString());
     bag->writeCalibration(now, colorizer.calibs());
     if (segmentation->isAvailable()) {
         bag->writeClassNames(now, segmentation->classNames());
@@ -700,6 +737,5 @@ MainWindow::~MainWindow()
         camPtr->stop();
     }
 
-    // Make sure every queued image / point cloud is written before exiting
-    AsyncWriter::instance().flush();
+    // The bag (when recording) writes what is still queued when it is destroyed
 }

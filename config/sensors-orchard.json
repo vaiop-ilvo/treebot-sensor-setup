@@ -10,7 +10,14 @@
   ],
   "robot": {
     "host": "192.168.1.20",
-    "port": 6379
+    "port": 6379,
+    "keys": [
+      "pc.gps.fix",
+      "pc.gps.ground_speed",
+      "plc.monitor.navigation.velocity.longitudinal",
+      "plc.monitor.navigation.velocity.angular",
+      { "key": "gps.ref.state", "type": "json" }
+    ]
   },
   "calibration": "config/calib.json",
   "pointcloud_color": "segmentation",
@@ -33,6 +40,5 @@
     "max_height": 1.5,
     "cell_size": 0.1,
     "size": 40.0
-  },
-  "record_format": "folder"
+  }
 }
