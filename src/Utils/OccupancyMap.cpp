@@ -62,3 +62,40 @@ OccupancyMap buildOccupancyMap(const std::vector<BirdEyePoint>& points, const Oc
     }
     return map;
 }
+
+cv::Mat renderOccupancyMap(const OccupancyMap& map, const BirdEyeView& view, const std::vector<cv::Vec3b>& palette, const cv::Vec3b& bg)
+{
+    cv::Mat image(view.size, CV_8UC3, cv::Scalar(bg[0], bg[1], bg[2]));
+    const cv::Vec3b freeColor(std::min(255, bg[0] + 28), std::min(255, bg[1] + 30), std::min(255, bg[2] + 32));
+    const cv::Vec3b noClassColor(170, 170, 170);
+
+    // Cell of every pixel column (left) and row (forward): the inverse of BirdEyeView::toPixel
+    std::vector<int> iyOfColumn(view.size.width);
+    for (int u = 0; u < view.size.width; ++u) {
+        const float left = view.center.y - (u + 0.5f - view.size.width * 0.5f) * view.metersPerPixel;
+        iyOfColumn[u] = static_cast<int>(std::floor((left - map.originY) / map.cellSize));
+    }
+    for (int v = 0; v < view.size.height; ++v) {
+        const float forward = view.center.x - (v + 0.5f - view.size.height * 0.5f) * view.metersPerPixel;
+        const int ix = static_cast<int>(std::floor((forward - map.originX) / map.cellSize));
+        if (ix < 0 || ix >= map.cellsX) {
+            continue;
+        }
+        cv::Vec3b* row = image.ptr<cv::Vec3b>(v);
+        for (int u = 0; u < view.size.width; ++u) {
+            const int iy = iyOfColumn[u];
+            if (iy < 0 || iy >= map.cellsY) {
+                continue;
+            }
+            const size_t cell = static_cast<size_t>(iy) * map.cellsX + ix;
+            const int8_t occupancy = map.occupancy[cell];
+            if (occupancy == OccupancyMap::FREE) {
+                row[u] = freeColor;
+            } else if (occupancy == OccupancyMap::OCCUPIED) {
+                const uint8_t label = map.classes[cell];
+                row[u] = label < palette.size() ? palette[label] : noClassColor;
+            }
+        }
+    }
+    return image;
+}

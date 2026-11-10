@@ -1,8 +1,8 @@
 #pragma once
 
-#include <chrono>
-#include <deque>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <vector>
 
 #include <QLabel>
@@ -11,41 +11,31 @@
 #include <QString>
 #include <QTimer>
 
-#include <Gui/LidarWidget.h>
 #include <Gui/CameraWidget.h>
+#include <Gui/LidarWidget.h>
 #include <Gui/RecordWidget.h>
 #include <Gui/ReplayWidget.h>
 #include <Gui/RobotWidget.h>
-#include <Lidar/Ouster.h>
-#include <Camera/Daheng.h>
-#include <Robot/ArtofRobot.h>
-#include <Utils/BagWriter.h>
-#include <Utils/GroundPlane.h>
+#include <Utils/Acquisition.h>
+#include <Utils/Frame.h>
 #include <Utils/PointCloudColor.h>
+#include <Utils/Processor.h>
+#include <Utils/Recorder.h>
 #include <Utils/SegmentationWorker.h>
 #include <Utils/SensorConfig.h>
 
+// The window: builds the pipeline and shows its results. All work happens on other threads:
+//   Acquisition (sensors -> rows) -> Processor (ground plane, occupancy map, colours; Recorder) -> this window
+//                                              -> SegmentationWorker (classes)                     -> this window
+// The window only draws, the newest result first; it never delays the acquisition or the recording.
 class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(const SensorConfig& config = SensorConfig::load(), QWidget *parent = nullptr);
     ~MainWindow();
 
 private:
-    // A row being collected: started by a trigger (lidar scan), completed when every camera has a frame
-    // after the trigger timestamp (or timed out). Each camera gets the frame closest to the trigger timestamp.
-    struct PendingCapture {
-        std::chrono::steady_clock::time_point deadline;
-        uint64_t triggerTs = 0;     // Host time in microseconds since epoch
-        uint64_t fileIndex = 0;
-        bool record = false;
-        OusterMetaData lidar;
-        RobotMetaData robot;
-        std::shared_ptr<std::vector<vaiop::QtPoint>> pointCloud;  // Coloured with the camera frames when the row completes
-        GroundPlane plane;          // Ground plane of the scan, fitted when recording to a rosbag
-        uint64_t cloudStamp = 0;    // Stamp of the scan in the rosbag, 0 when not written
-    };
-
     SensorConfig config;
+    CameraColorizer colorizer;                    // Calibrations in the order of config.cameras
 
     // Widgets
     QStackedWidget* headerStack;    // Record controls when live, replay controls when replaying
@@ -57,62 +47,43 @@ private:
     QLabel* triggerStatus;
     QLabel* writerStatus;
     QLabel* configStatus;
-
-    // Sensors
-    std::unique_ptr<Ouster> lidarPtr;
-    std::vector<std::shared_ptr<Daheng>> cameras;
-    std::vector<uint64_t> lastCameraSequence;     // Frame used by the previous row, so a frame is never logged twice
-    std::unique_ptr<ArtofRobot> robotPtr;
-
-    QTimer acquisitionTimer;
     QTimer statusTimer;
-    std::chrono::steady_clock::time_point lastSoftTrigger;
-    std::deque<PendingCapture> pending;           // Oldest first; rows are logged in trigger order
+
     QString lidarOfflineReason;                   // Shown again when returning from a replay
     QString liveTriggerText;
-
-    // While replaying, the sensors keep running in the background but are not shown
-    bool replaying = false;
-    RecordedFrame lastReplayFrame;                // Shown again when the colour mode changes
-
-    // Point cloud colouring
+    bool replaying = false;                       // The sensors keep running in the background, but are not shown
+    RecordedFrame lastReplayFrame;                // Processed again when the colour mode changes
     ColorMode colorMode = ColorMode::Distance;
-    CameraColorizer colorizer;                    // Calibrations in the order of config.cameras
-    std::vector<bool> rotationWarned;             // A rotation mismatch is reported once per camera
-    uint64_t segmentationTag = 0;                 // Changes with the colour mode and live/replay: older results are dropped
+    uint64_t tag = 0;                             // Changes with the colour mode and live/replay: older results are dropped
+    std::shared_ptr<const ProcessedFrame> shownFrame;
+
+    // Newest results of the other threads, shown by the GUI thread (one queued call at a time)
+    std::mutex latestMutex;
+    std::shared_ptr<const ProcessedFrame> latestFrame;
+    bool frameScheduled = false;
+    std::optional<SegmentationWorker::Result> latestSegmentation;
+    bool segmentationScheduled = false;
 
     void setupUI();
-    void connectSensors();
-    void onTick();
-    bool waitForTrigger();
-    void startCapture();
-    bool captureComplete(const PendingCapture& capture) const;
-    // showCloud: colour and show the point cloud (RGB mode); false when a newer scan is already waiting
-    void finishCapture(const PendingCapture& capture, bool showCloud);
-    void rotateCamera(size_t index);
+    void onConnected(const Acquisition::Connection& connection);
+    void onProcessed(std::shared_ptr<const ProcessedFrame> frame);          // Processor thread
+    void onSegmented(SegmentationWorker::Result result);                    // Segmentation thread
+    void showFrame(const ProcessedFrame& processed);
+    void showSegmentation(const SegmentationWorker::Result& result);
+    void showSegmentationDevice(const SegmentationWorker::DeviceStatus& status);
     void startReplay();
     void stopReplay();
-    void showRecordedFrame(const RecordedFrame& frame);
+    void processReplayFrame(const RecordedFrame& recorded);
     void setColorMode(ColorMode mode);
-    // Copy of the cloud coloured with the camera images (RGB, index = camera index, empty = no image)
-    std::shared_ptr<std::vector<vaiop::QtPoint>> colorWithCameras(const std::vector<vaiop::QtPoint>& cloud,
-                                                                  const std::vector<cv::Mat>& imagesRGB) const;
-    // Shows a point cloud coloured by the segmentation worker (GUI thread)
-    void showSegmentation(const SegmentationWorker::Result& result);
-    // Shows where the segmentation model runs after a device change (GUI thread)
-    void showSegmentationDevice(const SegmentationWorker::DeviceStatus& status);
-    // The camera tiles show the segmentation overlays of the worker instead of the camera frames
+    void startRecording();
+    void stopRecording();
+    // The camera tiles show the segmentation overlays instead of the camera frames
     bool showingOverlay() const;
     void updateStatus();
 
-    // Rosbag recording: opened when a recording with a rosbag format starts, closed when it stops
-    GroundPlane recordPlane;                      // Ground plane of the recorded scans, smoothed over time
-    uint64_t recordedRows = 0;                    // Rows in the current bag
-    void startBag();
-    void stopBag();
-    // Before segmentation: the worker writes its results to it, so the bag must outlive the worker thread
-    std::unique_ptr<BagWriter> bag = std::make_unique<BagWriter>();
-
-    // Last member: its thread is stopped first when the window is destroyed
+    // The pipeline, in the order it is built; the destructor stops it from the sensors down
+    std::unique_ptr<Recorder> recorder;
     std::unique_ptr<SegmentationWorker> segmentation;
+    std::unique_ptr<Processor> processor;
+    std::unique_ptr<Acquisition> acquisition;
 };

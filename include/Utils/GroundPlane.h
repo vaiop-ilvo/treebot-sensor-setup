@@ -76,7 +76,3 @@ struct BirdEyeView {
 // so objects are drawn on top of the ground below them.
 cv::Mat renderBirdEye(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, const cv::Vec3b& bg);
 
-// Class grid: the ground divided in square cells of cellSize metres, each filled with the most common class of its
-// points. Points above the ground (objects) outvote the ground in their cell, so objects cover the ground below them;
-// ground cells are drawn dimmer. Unlabelled points only count in cells without labelled points (grey = not seen).
-cv::Mat renderBirdEyeGrid(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, float cellSize, const cv::Vec3b& bg);

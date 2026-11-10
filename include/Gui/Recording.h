@@ -20,10 +20,6 @@ struct RecordedFrame {
     RobotMetaData robot;
 };
 
-// Columns of the CSV log of a recording folder: timestamp, lidar_*, camN_*, robot_* and redis:<key> for the extra
-// Redis keys. Recordings are rosbags now; scripts/bag_to_folder.py writes this format from the header in /record/info.
-std::vector<std::string> folderLogHeader(int nCameras, const std::vector<std::string>& extraRobotKeys);
-
 // A recording folder (scripts/bag_to_folder.py, or the folder recording of older versions): the sensor_log_*.csv plus the lidar/ and camN/ files it refers to
 class Recording {
 public:

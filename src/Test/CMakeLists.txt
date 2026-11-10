@@ -35,8 +35,9 @@ add_executable(qt_example_full "qt_example_full.cpp"
 )
 target_link_libraries(qt_example_full PRIVATE treebot_core)
 
-# Offline tools: treebot_tool snapshot | segment | colorize
-add_executable(treebot_tool "treebot_tool.cpp" "tool_snapshot.cpp" "tool_segment.cpp" "tool_colorize.cpp")
+# Tools: treebot_tool snapshot | segment | colorize | record
+add_executable(treebot_tool "treebot_tool.cpp" "tool_snapshot.cpp" "tool_segment.cpp" "tool_colorize.cpp"
+  "tool_record.cpp")
 target_link_libraries(treebot_tool PRIVATE treebot_core)
 
 # Programs that use ROS 2: find its libraries without setup.bash (see ROSBAG_LINK_OPTIONS in the top CMakeLists.txt)

@@ -49,26 +49,6 @@ namespace {
     }
 }
 
-std::vector<std::string> folderLogHeader(int nCameras, const std::vector<std::string>& extraRobotKeys)
-{
-    std::vector<std::string> header = {"timestamp", "lidar_ip", "lidar_ts", "lidar_frame_id", "lidar_fps", "lidar_pc_path"};
-    for (int i = 1; i <= nCameras; ++i) {
-        const std::string cam = "cam" + std::to_string(i);
-        for (const char* field : {"_ip", "_ts", "_frame_id", "_fps", "_im_path"}) {
-            header.push_back(cam + field);
-        }
-    }
-    for (const char* field : {"robot_x", "robot_y", "robot_z", "robot_roll", "robot_pitch", "robot_yaw",
-                              "robot_lat", "robot_lon", "robot_gps_fix", "robot_gps_lng_speed",
-                              "robot_odom_lng_speed", "robot_odom_ang_speed"}) {
-        header.push_back(field);
-    }
-    for (const std::string& key : extraRobotKeys) {
-        header.push_back("redis:" + key);
-    }
-    return header;
-}
-
 bool Recording::open(const QString& folder, QString& error)
 {
     QDir dir(folder);

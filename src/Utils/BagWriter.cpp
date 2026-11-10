@@ -394,8 +394,7 @@ void BagWriter::writeClassNames(uint64_t stampUs, const std::vector<std::string>
     });
 }
 
-void BagWriter::writeScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, const GroundPlane& plane,
-                          const OccupancyMapConfig& config, bool withGridMap)
+void BagWriter::writeScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud)
 {
     if (!cloud) {
         return;
@@ -419,28 +418,41 @@ void BagWriter::writeScan(uint64_t stampUs, std::shared_ptr<const std::vector<va
         }
         impl->write(msg, "/lidar/points", stampUs);
     });
+}
+
+void BagWriter::writeGroundPlane(uint64_t stampUs, const GroundPlane& plane)
+{
     if (!plane.valid) {
-        return;     // No ground: no occupancy map
+        return;
     }
-    impl->enqueue([this, stampUs, cloud, plane, config, withGridMap]() {
+    impl->enqueue([this, stampUs, plane]() {
         tf2_msgs::msg::TFMessage tf;
         tf.transforms.push_back(groundTransform(stampUs, plane));
         impl->write(tf, "/tf", stampUs);
+    });
+}
 
-        const OccupancyMap map = buildOccupancyMap(projectToGround(*cloud, plane), config, false);
-        impl->write(toOccupancyGrid(stampUs, map), "/occupancy_map", stampUs);
+void BagWriter::writeOccupancy(uint64_t stampUs, std::shared_ptr<const OccupancyMap> map, bool occupancyGrid, bool gridMap)
+{
+    if (!map) {
+        return;
+    }
+    impl->enqueue([this, stampUs, map, occupancyGrid, gridMap]() {
+        if (occupancyGrid) {
+            impl->write(toOccupancyGrid(stampUs, *map), "/occupancy_map", stampUs);
+        }
 #ifdef WITH_GRID_MAP
-        if (withGridMap) {
-            impl->write(toGridMap(stampUs, map), "/occupancy_map/grid_map", stampUs);
+        if (gridMap) {
+            impl->write(toGridMap(stampUs, *map), "/occupancy_map/grid_map", stampUs);
         }
 #else
-        (void)withGridMap;
+        (void)gridMap;
 #endif
     });
 }
 
 void BagWriter::writeSegmentedScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud,
-                                   std::vector<uint8_t> labels, const GroundPlane& plane, const OccupancyMapConfig& config)
+                                   std::vector<uint8_t> labels)
 {
     if (!cloud || labels.size() != cloud->size()) {
         return;
@@ -473,17 +485,6 @@ void BagWriter::writeSegmentedScan(uint64_t stampUs, std::shared_ptr<const std::
         }
         impl->write(msg, "/lidar/points_segmented", stampUs);
     });
-#ifdef WITH_GRID_MAP
-    if (plane.valid) {
-        impl->enqueue([this, stampUs, cloud, sharedLabels, plane, config]() {
-            const OccupancyMap map = buildOccupancyMap(projectToGround(*cloud, plane, sharedLabels.get()), config, true);
-            impl->write(toGridMap(stampUs, map), "/occupancy_map/grid_map", stampUs);
-        });
-    }
-#else
-    (void)plane;
-    (void)config;
-#endif
 }
 
 void BagWriter::writeImage(size_t camera, uint64_t stampUs, const cv::Mat& imageRGB)
@@ -607,9 +608,10 @@ size_t BagWriter::pending() const { return 0; }
 size_t BagWriter::dropped() const { return 0; }
 void BagWriter::writeCalibration(uint64_t, const std::vector<CameraCalib>&) {}
 void BagWriter::writeClassNames(uint64_t, const std::vector<std::string>&) {}
-void BagWriter::writeScan(uint64_t, std::shared_ptr<const std::vector<vaiop::QtPoint>>, const GroundPlane&, const OccupancyMapConfig&, bool) {}
-void BagWriter::writeSegmentedScan(uint64_t, std::shared_ptr<const std::vector<vaiop::QtPoint>>, std::vector<uint8_t>,
-                                   const GroundPlane&, const OccupancyMapConfig&) {}
+void BagWriter::writeScan(uint64_t, std::shared_ptr<const std::vector<vaiop::QtPoint>>) {}
+void BagWriter::writeGroundPlane(uint64_t, const GroundPlane&) {}
+void BagWriter::writeOccupancy(uint64_t, std::shared_ptr<const OccupancyMap>, bool, bool) {}
+void BagWriter::writeSegmentedScan(uint64_t, std::shared_ptr<const std::vector<vaiop::QtPoint>>, std::vector<uint8_t>) {}
 void BagWriter::writeImage(size_t, uint64_t, const cv::Mat&) {}
 void BagWriter::writeRobot(uint64_t, const RobotMetaData&) {}
 void BagWriter::writeRecordInfo(uint64_t, std::string) {}

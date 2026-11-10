@@ -226,7 +226,7 @@ void PointCloudWidget::setBlobs(std::vector<Blob> newBlobs)
 }
 
 
-void PointCloudWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> newPoints)
+void PointCloudWidget::setPointCloud(std::shared_ptr<const std::vector<vaiop::QtPoint>> newPoints)
 {
     // Only keep a reference here: the upload happens in paintGL where the context is guaranteed to be ready
     points = std::move(newPoints);

@@ -2,6 +2,7 @@
 //   treebot_tool snapshot <output directory>                        one lidar scan and one image per camera
 //   treebot_tool segment <model dir> <out dir> <image.png> ...      segment camera images
 //   treebot_tool colorize <calib.json> <cloud.ply> <out.ply> ...    colour a scan with images or classes, occupancy map, rosbag
+//   treebot_tool record <folder> [--seconds N] [--segment]          record a rosbag without the GUI
 // Run a subcommand without arguments for its options.
 #include <cstring>
 #include <iostream>
@@ -10,6 +11,7 @@
 int snapshotCommand(int argc, char* argv[]);
 int segmentCommand(int argc, char* argv[]);
 int colorizeCommand(int argc, char* argv[]);
+int recordCommand(int argc, char* argv[]);
 
 int main(int argc, char* argv[])
 {
@@ -26,9 +28,13 @@ int main(int argc, char* argv[])
     if (command == "colorize") {
         return colorizeCommand(argc - 1, argv + 1);
     }
+    if (command == "record") {
+        return recordCommand(argc - 1, argv + 1);
+    }
     std::cerr << "Usage: " << argv[0] << " <command> [arguments]\n"
               << "  snapshot   save one lidar scan and one image per camera (to check the calibration)\n"
               << "  segment    segment camera images with the segmentation model\n"
-              << "  colorize   colour a recorded scan with images or classes; occupancy map (--bev), rosbag (--bag)\n";
+              << "  colorize   colour a recorded scan with images or classes; occupancy map (--bev), rosbag (--bag)\n"
+              << "  record     record a rosbag without the GUI (same pipeline as the application)\n";
     return command.empty() || command == "-h" || command == "--help" ? 0 : 1;
 }

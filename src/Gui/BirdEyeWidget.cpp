@@ -15,9 +15,6 @@ namespace {
     constexpr float DEFAULT_FORWARD = 4.0f;
     constexpr float MIN_RADIUS = 2.0f;
     constexpr float MAX_RADIUS = 60.0f;
-    // Class grid: cells of 10 cm, larger when zoomed out so a cell stays at least this many pixels wide
-    constexpr float GRID_CELL = 0.10f;
-    constexpr float GRID_MIN_PIXELS = 3.0f;
 
     // Ring spacing so that there are a few rings in view: 1, 2, 5, 10, 20 m
     float ringSpacing(float radius)
@@ -64,23 +61,20 @@ void BirdEyeWidget::setClassGrid(bool on)
     }
 }
 
+void BirdEyeWidget::setOccupancyMap(std::shared_ptr<const OccupancyMap> map, std::vector<cv::Vec3b> newPalette)
+{
+    occupancy = std::move(map);
+    palette = std::move(newPalette);
+    imageDirty = true;
+    update();
+}
+
 void BirdEyeWidget::setHeightRange(float newMin, float newMax)
 {
     minHeight = std::min(newMin, newMax);
     maxHeight = std::max(newMin, newMax);
     imageDirty = true;
     update();
-}
-
-float BirdEyeWidget::gridCellSize(const BirdEyeView& v) const
-{
-    // 10, 20, 50 cm, ...: round sizes, so the label stays readable
-    for (const float cell : {GRID_CELL, 0.2f, 0.5f, 1.0f}) {
-        if (cell / v.metersPerPixel >= GRID_MIN_PIXELS) {
-            return cell;
-        }
-    }
-    return 2.0f;
 }
 
 void BirdEyeWidget::resetView()
@@ -109,7 +103,7 @@ void BirdEyeWidget::paintEvent(QPaintEvent*)
     const BirdEyeView v = view();
     if (imageDirty || image.size() != size()) {
         const cv::Vec3b bg(Theme::viewport.red(), Theme::viewport.green(), Theme::viewport.blue());
-        const cv::Mat rgb = classGrid ? renderBirdEyeGrid(points, v, gridCellSize(v), bg) : renderBirdEye(points, v, bg);
+        const cv::Mat rgb = classGrid && occupancy ? renderOccupancyMap(*occupancy, v, palette, bg) : renderBirdEye(points, v, bg);
         image = QImage(rgb.data, rgb.cols, rgb.rows, static_cast<qsizetype>(rgb.step), QImage::Format_RGB888).copy();
         imageDirty = false;
     }
@@ -170,8 +164,8 @@ void BirdEyeWidget::paintEvent(QPaintEvent*)
               .arg(minHeight, 0, 'f', 2).arg(maxHeight, 0, 'f', 2)
               .arg(plane.sensorHeight(), 0, 'f', 2).arg(plane.tiltDeg(), 0, 'f', 1)
         : QString("No ground plane found");
-    if (classGrid && plane.valid) {
-        text += QString(" · class grid %1 cm").arg(std::lround(gridCellSize(v) * 100.0f));
+    if (classGrid && occupancy) {
+        text += QString(" · class grid %1 cm").arg(std::lround(occupancy->cellSize * 100.0f));
     }
     painter.drawText(rect().adjusted(8, 6, -8, -6), Qt::AlignLeft | Qt::AlignTop, text);
 }

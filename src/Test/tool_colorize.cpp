@@ -10,6 +10,7 @@
 #include <Utils/Blobs.h>
 #include <Utils/GroundPlane.h>
 #include <Utils/LidarCamera.h>
+#include <Utils/OccupancyMap.h>
 #include <Utils/PlyFile.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Segmenter.h>
@@ -169,8 +170,16 @@ int colorizeCommand(int argc, char* argv[])
         }
         const std::vector<BirdEyePoint> groundPoints = projectToGround(shown, plane, &shownLabels);
         const auto t2 = std::chrono::steady_clock::now();
-        cv::Mat bev = gridCell > 0.0f && !labels.empty() ? renderBirdEyeGrid(groundPoints, view, gridCell, cv::Vec3b(17, 20, 25))
-                                                         : renderBirdEye(groundPoints, view, cv::Vec3b(17, 20, 25));
+        cv::Mat bev;
+        if (gridCell > 0.0f && !labels.empty()) {
+            // Class grid: the occupancy map with the class layer, in cells of gridCell, as the application shows it
+            OccupancyMapConfig gridConfig = sensorConfig().occupancyMap;
+            gridConfig.cellSize = gridCell;
+            const OccupancyMap map = buildOccupancyMap(projectToGround(cloud, plane, &labels), gridConfig, true);
+            bev = renderOccupancyMap(map, view, palette, cv::Vec3b(17, 20, 25));
+        } else {
+            bev = renderBirdEye(groundPoints, view, cv::Vec3b(17, 20, 25));
+        }
         std::cout << "Bird's-eye view rendered in " << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count() << " ms\n";
         for (const BirdEyeBlob& blob : projectToGround(blobs, plane)) {
             if (blob.height < view.minHeight || blob.height > view.maxHeight) {
@@ -200,10 +209,20 @@ int colorizeCommand(int argc, char* argv[])
         const GroundPlane plane = fitGroundPlane(cloud);
         auto shared = std::make_shared<const std::vector<vaiop::QtPoint>>(cloud);
         bag.writeCalibration(stamp, colorizer.calibs());
-        bag.writeScan(stamp, shared, plane, sensorConfig().occupancyMap, labels.empty());
+        const OccupancyMapConfig& occupancyConfig = sensorConfig().occupancyMap;
+        bag.writeScan(stamp, shared);
+        bag.writeGroundPlane(stamp, plane);
+        if (plane.valid) {
+            bag.writeOccupancy(stamp, std::make_shared<const OccupancyMap>(
+                buildOccupancyMap(projectToGround(cloud, plane), occupancyConfig, false)), true, labels.empty());
+        }
         if (!labels.empty()) {
             bag.writeClassNames(stamp, classNames);
-            bag.writeSegmentedScan(stamp, shared, labels, plane, sensorConfig().occupancyMap);
+            bag.writeSegmentedScan(stamp, shared, labels);
+            if (plane.valid) {
+                bag.writeOccupancy(stamp, std::make_shared<const OccupancyMap>(
+                    buildOccupancyMap(projectToGround(cloud, plane, &labels), occupancyConfig, true)), false, true);
+            }
         }
         for (size_t c = 0; c < imagesRGB.size(); ++c) {
             bag.writeImage(c, stamp, imagesRGB[c]);

@@ -6,7 +6,10 @@
 
 #include <vector>
 
+#include <memory>
+
 #include <Utils/GroundPlane.h>
+#include <Utils/OccupancyMap.h>
 
 // Occupancy map: top-down view of the point cloud projected on the ground plane, only the points in a height range
 // above the ground. The lidar at the origin, forward up, rings every few metres. Wheel = zoom, drag = pan,
@@ -19,8 +22,9 @@ public:
     void setPoints(std::vector<BirdEyePoint> points, const GroundPlane& plane, std::vector<BirdEyeBlob> blobs = {});
     void clear();
     void resetView();
-    // Class grid instead of points: cells filled with their most common class (needs labelled points)
+    // Class grid instead of points: the occupancy map, occupied cells in their class colour (palette)
     void setClassGrid(bool on);
+    void setOccupancyMap(std::shared_ptr<const OccupancyMap> map, std::vector<cv::Vec3b> palette);
     // Only points from minHeight up to maxHeight above the ground plane are shown [m]
     void setHeightRange(float minHeight, float maxHeight);
 
@@ -37,6 +41,8 @@ private:
     std::vector<BirdEyeBlob> blobs;
     GroundPlane plane;
     bool classGrid = false;
+    std::shared_ptr<const OccupancyMap> occupancy;
+    std::vector<cv::Vec3b> palette;
     float minHeight;
     float maxHeight;
 
@@ -49,5 +55,4 @@ private:
     bool imageDirty = true;
 
     BirdEyeView view() const;
-    float gridCellSize(const BirdEyeView& v) const;
 };

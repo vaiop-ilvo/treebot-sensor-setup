@@ -30,3 +30,7 @@ struct OccupancyMap {
 
 // Builds the map from the points projected on the ground (projectToGround). The labels of the points give the class layer.
 OccupancyMap buildOccupancyMap(const std::vector<BirdEyePoint>& points, const OccupancyMapConfig& config, bool labelled);
+
+// Draws the map top-down (RGB, CV_8UC3): occupied cells in their class colour (palette; grey without class), free
+// cells dark grey, unknown cells in the background colour bg
+cv::Mat renderOccupancyMap(const OccupancyMap& map, const BirdEyeView& view, const std::vector<cv::Vec3b>& palette, const cv::Vec3b& bg);

@@ -11,6 +11,7 @@
 #include <Utils/GroundPlane.h>
 #include <Utils/LidarCamera.h>
 #include <Utils/MetaData.hpp>
+#include <Utils/OccupancyMap.h>
 #include <Utils/SensorConfig.h>
 
 // Records the sensor data in a ROS 2 bag (rosbag2, MCAP storage), next to or instead of the folder recording.
@@ -56,14 +57,15 @@ public:
     // Once per bag: names of the class layer
     void writeClassNames(uint64_t stampUs, const std::vector<std::string>& names);
 
-    // A lidar scan: /lidar/points, /tf (ground -> lidar), /occupancy_map and, when withGridMap, the GridMap without
-    // class layer (in segmentation mode the GridMap comes with writeSegmentedScan instead)
-    void writeScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, const GroundPlane& plane,
-                   const OccupancyMapConfig& config, bool withGridMap);
-    // A segmented scan (colour = class colour, labels = class per point): /lidar/points_segmented and the GridMap
-    // with the class layer
-    void writeSegmentedScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud,
-                            std::vector<uint8_t> labels, const GroundPlane& plane, const OccupancyMapConfig& config);
+    // A lidar scan: /lidar/points
+    void writeScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud);
+    // Its ground plane: /tf (ground -> lidar); nothing for an invalid plane
+    void writeGroundPlane(uint64_t stampUs, const GroundPlane& plane);
+    // An occupancy map: /occupancy_map (OccupancyGrid) and/or /occupancy_map/grid_map (GridMap, with the class layer
+    // when the map has classes)
+    void writeOccupancy(uint64_t stampUs, std::shared_ptr<const OccupancyMap> map, bool occupancyGrid, bool gridMap);
+    // A segmented scan (colour = class colour, labels = class per point): /lidar/points_segmented
+    void writeSegmentedScan(uint64_t stampUs, std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, std::vector<uint8_t> labels);
     // A camera frame (RGB): /camN/image/compressed and /camN/camera_info (camera = index, cam1 = 0)
     void writeImage(size_t camera, uint64_t stampUs, const cv::Mat& imageRGB);
     void writeRobot(uint64_t stampUs, const RobotMetaData& robot);

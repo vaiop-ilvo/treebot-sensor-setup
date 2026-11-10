@@ -86,9 +86,9 @@ LidarWidget::LidarWidget(QWidget* parent)
     // Class grid, shown in the bird's-eye view in segmentation mode
     gridBox = new QCheckBox("Class grid", this);
     gridBox->setChecked(true);
-    gridBox->setToolTip("Occupancy map as a grid: the ground in cells (10 cm, larger when zoomed out), each filled with the most\n"
-                        "common class of its points. Objects cover the ground below them; the ground is drawn dimmer.\n"
-                        "Off: the individual points.");
+    gridBox->setToolTip("The occupancy map as recorded (cells of cell_size in sensors.json): occupied cells (points in the height\n"
+                        "range) in the colour of their most common class, grey when no camera saw them; free cells (only points\n"
+                        "below the range) dark grey; unknown cells empty. Off: the individual points.");
     connect(gridBox, &QCheckBox::toggled, this, [this](bool) { showCloud(); });
 
     // Blob size, shown while the blob view is on
@@ -143,14 +143,12 @@ LidarWidget::LidarWidget(QWidget* parent)
     updateViewControls();
 }
 
-void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc) {
-    setPointCloud(std::move(pc), {}, {});
-}
-
-void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc, std::vector<uint8_t> labels,
-                                std::vector<cv::Vec3b> palette) {
+void LidarWidget::setScene(std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, const GroundPlane& plane,
+                           std::shared_ptr<const OccupancyMap> map, std::vector<uint8_t> labels, std::vector<cv::Vec3b> palette) {
     messageLabel->hide();
-    lastCloud = std::move(pc);
+    lastCloud = std::move(cloud);
+    groundPlane = plane;
+    occupancy = std::move(map);
     lastLabels = std::move(labels);
     lastPalette = std::move(palette);
     showCloud();
@@ -177,15 +175,10 @@ void LidarWidget::showCloud() {
         birdEyeWidget->clear();
         return;
     }
-
-    // ~1 ms for the plane fit; needed by the bird's-eye view and to leave the ground out of the blobs
     const bool blobView = showingBlobs();
-    if (birdEye || blobView) {
-        groundPlane = fitGroundPlane(*lastCloud, &groundPlane);
-    }
 
     // The cloud to show: everything, or only the points of the blobs that are large enough
-    std::shared_ptr<std::vector<vaiop::QtPoint>> shown = lastCloud;
+    std::shared_ptr<const std::vector<vaiop::QtPoint>> shown = lastCloud;
     const bool labelled = lastLabels.size() == lastCloud->size();
     std::vector<uint8_t> shownLabels = labelled && birdEye ? lastLabels : std::vector<uint8_t>{};
     std::vector<Blob> blobs;
@@ -200,24 +193,27 @@ void LidarWidget::showCloud() {
             }
         }
         BlobResult result = findBlobs(*lastCloud, lastLabels, lastPalette, minBlobPoints(), BLOB_LINK_DISTANCE, include);
-        shown = std::make_shared<std::vector<vaiop::QtPoint>>();
-        shown->reserve(lastCloud->size() / 2);
+        auto blobPoints = std::make_shared<std::vector<vaiop::QtPoint>>();
+        blobPoints->reserve(lastCloud->size() / 2);
         shownLabels.clear();
         for (size_t i = 0; i < lastCloud->size(); ++i) {
             if (result.pointBlob[i] >= 0) {
-                shown->push_back((*lastCloud)[i]);
+                blobPoints->push_back((*lastCloud)[i]);
                 if (birdEye) {
                     shownLabels.push_back(lastLabels[i]);
                 }
             }
         }
+        shown = blobPoints;
         blobs = std::move(result.blobs);
     }
     blobCount = blobs.size();
     updateBlobLabel();
 
     if (birdEye) {
-        birdEyeWidget->setClassGrid(gridBox->isChecked() && labelled);
+        // Class grid: the occupancy map of the scan (with the class layer when it is segmented)
+        birdEyeWidget->setClassGrid(gridBox->isChecked() && labelled && occupancy && occupancy->hasClasses);
+        birdEyeWidget->setOccupancyMap(occupancy, lastPalette);
         birdEyeWidget->setPoints(projectToGround(*shown, groundPlane, &shownLabels), groundPlane, projectToGround(blobs, groundPlane));
     } else {
         pointCloudWidget->setPointCloud(shown);

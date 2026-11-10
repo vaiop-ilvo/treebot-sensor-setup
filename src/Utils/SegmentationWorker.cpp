@@ -2,9 +2,11 @@
 
 #include <chrono>
 
-SegmentationWorker::SegmentationWorker(const SegmentationConfig& config, CameraColorizer colorizer,
-                                       std::function<void(Result)> onResult, std::function<void(DeviceStatus)> onDeviceChanged)
+SegmentationWorker::SegmentationWorker(const SegmentationConfig& config, const OccupancyMapConfig& occupancyConfig,
+                                       CameraColorizer colorizer, std::function<void(Result)> onResult,
+                                       std::function<void(DeviceStatus)> onDeviceChanged)
     : config(config),
+      occupancyConfig(occupancyConfig),
       segmenter(std::make_unique<Segmenter>(config)),
       available(segmenter->isAvailable()),
       loadError(segmenter->error()),
@@ -72,7 +74,7 @@ void SegmentationWorker::setDevice(Segmenter::Device device)
 
 void SegmentationWorker::submit(Job job)
 {
-    if (!available || !job.cloud) {
+    if (!available || !job.frame || !job.frame->cloud) {
         return;
     }
     {
@@ -126,30 +128,40 @@ void SegmentationWorker::loadOn(Segmenter::Device device)
 SegmentationWorker::Result SegmentationWorker::process(const Job& job)
 {
     const auto tic = std::chrono::steady_clock::now();
+    const Frame& frame = *job.frame;
 
     Result result;
+    result.tag = job.tag;
+    result.frame = job.frame;
+    result.plane = job.plane;
     result.device = segmenter->device();
+
     // All cameras in one go: on the GPU they form one batch
-    const std::vector<cv::Mat> labelMaps = segmenter->segment(job.imagesRGB);
-    result.overlays.resize(job.imagesRGB.size());
-    for (size_t c = 0; c < job.imagesRGB.size(); ++c) {
-        if (!job.imagesRGB[c].empty()) {
-            result.overlays[c] = Segmenter::overlay(job.imagesRGB[c], labelMaps[c], colors);
+    std::vector<cv::Mat> imagesRGB(frame.cameras.size());
+    for (size_t c = 0; c < frame.cameras.size(); ++c) {
+        imagesRGB[c] = frame.cameras[c].colourImage;
+    }
+    const std::vector<cv::Mat> labelMaps = segmenter->segment(imagesRGB);
+    result.overlays.resize(imagesRGB.size());
+    for (size_t c = 0; c < imagesRGB.size(); ++c) {
+        if (!imagesRGB[c].empty()) {
+            result.overlays[c] = Segmenter::overlay(imagesRGB[c], labelMaps[c], colors);
         }
     }
 
-    result.tag = job.tag;
-    result.stamp = job.stamp;
-    result.plane = job.plane;
-    result.record = job.record;
-    result.cloud = std::make_shared<std::vector<vaiop::QtPoint>>(*job.cloud);
-    colorizer.colorizeLabels(*result.cloud, labelMaps, colors, &result.labels);
+    auto cloud = std::make_shared<std::vector<vaiop::QtPoint>>(*frame.cloud);
+    colorizer.colorizeLabels(*cloud, labelMaps, colors, &result.labels);
+    result.cloud = cloud;
 
     result.classPoints.assign(names.size(), 0);
     for (const uint8_t label : result.labels) {
         if (label < result.classPoints.size()) {
             result.classPoints[label]++;
         }
+    }
+    if (job.plane.valid) {
+        result.classMap = std::make_shared<const OccupancyMap>(
+            buildOccupancyMap(projectToGround(*cloud, job.plane, &result.labels), occupancyConfig, true));
     }
     result.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tic).count();
     return result;

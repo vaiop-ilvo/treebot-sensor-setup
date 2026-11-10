@@ -13,6 +13,7 @@
 #include <Gui/BirdEyeWidget.h>
 #include <Gui/PointCloudWidget.h>
 #include <Gui/SensorHeader.h>
+#include <Utils/OccupancyMap.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Segmenter.h>
 
@@ -21,9 +22,13 @@ class LidarWidget : public QFrame {
 public:
     LidarWidget(QWidget* parent = nullptr);
 
-    void setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc);
+    // A processed scan: the cloud with its ground plane and occupancy map (computed once in the Processor). A segmented
+    // cloud also has labels (class per point) and the class colours; they are needed for the blob view, and the
+    // occupancy map then has the class layer (class grid).
+    void setScene(std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, const GroundPlane& plane,
+                  std::shared_ptr<const OccupancyMap> occupancy, std::vector<uint8_t> labels = {},
+                  std::vector<cv::Vec3b> palette = {});
     // A segmented cloud: labels = class per point, palette = class colours. Needed for the blob view.
-    void setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc, std::vector<uint8_t> labels, std::vector<cv::Vec3b> palette);
     void setInfo(const std::string& ip, double fps, uint64_t frameId, size_t nPoints, Theme::Status status);
     void setOffline(const std::string& ip, const QString& reason);
     // Removes the point cloud and shows the text instead
@@ -74,10 +79,11 @@ private:
     QWidget* blobControls;
     QLabel* hintLabel;
 
-    std::shared_ptr<std::vector<vaiop::QtPoint>> lastCloud;   // Shown again when the view is switched
+    std::shared_ptr<const std::vector<vaiop::QtPoint>> lastCloud;   // Shown again when the view is switched
     std::vector<uint8_t> lastLabels;                            // Class per point of lastCloud, empty when not segmented
     std::vector<cv::Vec3b> lastPalette;
-    GroundPlane groundPlane;                                    // Previous fit, for temporal smoothing
+    GroundPlane groundPlane;                                    // Of lastCloud
+    std::shared_ptr<const OccupancyMap> occupancy;              // Of lastCloud
 
     void showCloud();
     void updateViewControls();
