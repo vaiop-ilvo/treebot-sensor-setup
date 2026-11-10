@@ -1,5 +1,6 @@
 #include <Gui/LidarWidget.h>
 #include <QHBoxLayout>
+#include <QSignalBlocker>
 #include <QStackedLayout>
 #include <QStandardItemModel>
 #include <QVBoxLayout>
@@ -29,6 +30,13 @@ LidarWidget::LidarWidget(QWidget* parent)
     colorBox->setItemData(1, "Colour of the camera pixels (needs config/calib.json); grey = not seen by a camera", Qt::ToolTipRole);
     setSegmentationAvailable(false, "No segmentation model configured");
     header->addTool(colorBox);
+
+    deviceBox = new QComboBox(this);
+    deviceBox->addItem("GPU", static_cast<int>(Segmenter::Device::Gpu));
+    deviceBox->addItem("CPU", static_cast<int>(Segmenter::Device::Cpu));
+    deviceBox->setToolTip("Where the segmentation model runs (segmentation mode)");
+    setSegmentationDevice(Segmenter::Device::Cpu);
+    header->addTool(deviceBox);
 
     overlayBox = new QCheckBox("Image overlay", this);
     overlayBox->setToolTip("Show the segmentation classes on the camera images (segmentation mode)");
@@ -208,6 +216,7 @@ void LidarWidget::updateViewControls() {
                                : "drag: rotate · right-drag: pan · scroll: zoom · double-click: reset");
     const bool segmentation = colorMode() == ColorMode::Segmentation;
     overlayBox->setEnabled(segmentation);
+    deviceBox->setEnabled(segmentation);
     blobButton->setEnabled(segmentation);
     blobControls->setVisible(segmentation && blobButton->isChecked());
 }
@@ -218,6 +227,24 @@ bool LidarWidget::imageOverlay() const {
 
 void LidarWidget::onImageOverlayChanged(std::function<void(bool)> callback) {
     connect(overlayBox, &QCheckBox::toggled, this, [this, callback](bool) { callback(imageOverlay()); });
+}
+
+void LidarWidget::setSegmentationDevice(Segmenter::Device device, const QString& gpuError) {
+    const QSignalBlocker blocker(deviceBox);
+    deviceBox->setCurrentIndex(deviceBox->findData(static_cast<int>(device)));
+    const int gpuIndex = deviceBox->findData(static_cast<int>(Segmenter::Device::Gpu));
+    deviceBox->setItemData(gpuIndex, gpuError.isEmpty() ? "Run the segmentation model on the NVIDIA GPU (CUDA)"
+                                                        : "GPU not available: " + gpuError, Qt::ToolTipRole);
+    deviceBox->setItemData(deviceBox->findData(static_cast<int>(Segmenter::Device::Cpu)),
+                           "Run the segmentation model on the CPU", Qt::ToolTipRole);
+    deviceBox->setToolTip(QString("Segmentation runs on the %1").arg(Segmenter::deviceName(device))
+                          + (gpuError.isEmpty() ? QString() : "\nGPU not available: " + gpuError));
+}
+
+void LidarWidget::onSegmentationDeviceChanged(std::function<void(Segmenter::Device)> callback) {
+    connect(deviceBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, callback](int) {
+        callback(static_cast<Segmenter::Device>(deviceBox->currentData().toInt()));
+    });
 }
 
 void LidarWidget::setInfo(const std::string& ip, double fps, uint64_t frameId, size_t nPoints, Theme::Status status) {

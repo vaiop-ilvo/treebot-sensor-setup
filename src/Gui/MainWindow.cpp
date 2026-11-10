@@ -45,11 +45,21 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
     rotationWarned.assign(config.cameras.size(), false);
 
     // Segmentation model on a background thread; its results are shown on the GUI thread
-    segmentation = std::make_unique<SegmentationWorker>(config.segmentation, colorizer, [this](SegmentationWorker::Result result) {
-        QMetaObject::invokeMethod(this, [this, result]() { showSegmentation(result); }, Qt::QueuedConnection);
-    });
+    segmentation = std::make_unique<SegmentationWorker>(config.segmentation, colorizer,
+        [this](SegmentationWorker::Result result) {
+            QMetaObject::invokeMethod(this, [this, result]() { showSegmentation(result); }, Qt::QueuedConnection);
+        },
+        [this](SegmentationWorker::DeviceStatus status) {
+            QMetaObject::invokeMethod(this, [this, status]() { showSegmentationDevice(status); }, Qt::QueuedConnection);
+        });
     if (!config.segmentation.modelDir.empty() && !segmentation->isAvailable()) {
         qWarning().noquote() << QString::fromStdString(segmentation->error());
+    } else if (segmentation->isAvailable()) {
+        const SegmentationWorker::DeviceStatus status = segmentation->deviceStatus();
+        qInfo().noquote() << "Segmentation runs on the" << Segmenter::deviceName(status.device);
+        if (!status.gpuError.empty() && config.segmentation.device != "cpu") {
+            qWarning().noquote() << "Segmentation not on the GPU:" << QString::fromStdString(status.gpuError);
+        }
     }
 
     colorMode = colorModeFromString(config.pointCloudColor);
@@ -123,6 +133,12 @@ void MainWindow::setupUI()
         lidarWidget->setLegend({}, "Segmenting…");
     }
     lidarWidget->onColorModeChanged([this](ColorMode mode) { setColorMode(mode); });
+    const SegmentationWorker::DeviceStatus deviceStatus = segmentation->deviceStatus();
+    lidarWidget->setSegmentationDevice(deviceStatus.device, QString::fromStdString(deviceStatus.gpuError));
+    lidarWidget->onSegmentationDeviceChanged([this](Segmenter::Device device) {
+        segmentation->setDevice(device);
+        statusBar()->showMessage(QString("Loading the segmentation model on the %1…").arg(Segmenter::deviceName(device)));
+    });
     lidarWidget->onImageOverlayChanged([this](bool) {
         // Live: the next scan shows the change; a replay shows the current row again
         if (replaying && lastReplayFrame.pointCloud) {
@@ -367,8 +383,21 @@ void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
         }
         entries.push_back({QString::fromStdString(names[k]), QColor(palette[k][0], palette[k][1], palette[k][2]), share});
     }
-    lidarWidget->setLegend(entries, QString("%1k of %2k points labelled · %3 ms")
-        .arg(labelled / 1000).arg(result.cloud->size() / 1000).arg(result.ms, 0, 'f', 0));
+    lidarWidget->setLegend(entries, QString("%1k of %2k points labelled · %3 ms (%4)")
+        .arg(labelled / 1000).arg(result.cloud->size() / 1000).arg(result.ms, 0, 'f', 0).arg(Segmenter::deviceName(result.device)));
+}
+
+void MainWindow::showSegmentationDevice(const SegmentationWorker::DeviceStatus& status)
+{
+    const QString gpuError = QString::fromStdString(status.gpuError);
+    lidarWidget->setSegmentationDevice(status.device, gpuError);
+    if (status.device == Segmenter::Device::Gpu || gpuError.isEmpty()) {
+        statusBar()->showMessage(QString("Segmentation runs on the %1").arg(Segmenter::deviceName(status.device)), 5000);
+    } else {
+        // The GPU was asked for but is not usable: the model stays on the CPU
+        qWarning().noquote() << "Segmentation not on the GPU:" << gpuError;
+        statusBar()->showMessage("GPU not available, segmentation runs on the CPU: " + gpuError, 15000);
+    }
 }
 
 void MainWindow::showRecordedFrame(const RecordedFrame& frame)

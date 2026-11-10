@@ -38,7 +38,7 @@ QTimer (every 5 ms, GUI thread, never blocks)
 * Each camera runs its own acquisition thread (`Daheng::acquisitionLoop`), which keeps its last 8 frames (with timestamps) in memory.
 * The robot state is read from Redis in a background thread (10 Hz, 300 ms timeout), so a missing robot never blocks or crashes the GUI.
 * At start-up `resetTimestamp()` is called back-to-back on the lidar and all cameras. This maps each sensor clock onto host time (µs since epoch), so their timestamps can be compared.
-* The segmentation model runs on its own thread and keeps only the newest job, so a slow model lowers the update rate of the segmented view but never delays the acquisition or the recording.
+* The segmentation model runs on its own thread and keeps only the newest job, so a slow model lowers the update rate of the segmented view but never delays the acquisition or the recording. The camera images of a scan go through the model as one batch; on the GPU when one is usable.
 * Images and point clouds are written by a pool of 4 writer threads (`AsyncWriter`). The queue is bounded: if the disk cannot keep up, files are dropped and the status bar shows how many. On exit the queue is flushed, so no file is cut off.
 
 ## Hardware & network
@@ -130,9 +130,20 @@ make -j && sudo make install && cd ../../..
 The segmentation colour mode needs [ONNX Runtime](https://onnxruntime.ai/) and a pretrained model. One script downloads both (ONNX Runtime 1.20.1 to `thirdparty/onnxruntime`, the model to `models/`):
 
 ```bash
-scripts/download_models.sh          # SegFormer-B0 (15 MB, fast enough on the CPU)
-scripts/download_models.sh b2       # SegFormer-B2 (sharper; for a GPU build of ONNX Runtime)
+scripts/download_models.sh          # SegFormer-B0 (15 MB, ~55 ms per camera image on the CPU)
+scripts/download_models.sh --gpu    # GPU build of ONNX Runtime + CUDA 12 / cuDNN 9 libraries (~1.8 GB)
+scripts/download_models.sh b2       # SegFormer-B2 (sharper; for the GPU)
 ```
+
+**GPU (NVIDIA, CUDA).** With `--gpu` the script replaces a CPU build of ONNX Runtime by the GPU build and puts the CUDA 12 / cuDNN 9 libraries in `thirdparty/cuda/lib` (NVIDIA's pip packages, no root needed, nothing installed system-wide; the application loads them from there). Re-run `cmake` afterwards: it reports `ONNX Runtime is the GPU build`. The model then runs on the GPU when one is usable and on the CPU otherwise (see `device` under [Configuration](#configuration)); the **GPU / CPU** selector in the lidar tile switches while the application runs.
+
+The GPU needs a loaded NVIDIA driver: `nvidia-smi` must list the GPU. After a kernel update Ubuntu sometimes has no driver module for the new kernel yet; then the application says `the NVIDIA driver is not loaded` and runs on the CPU. Install the module for the running kernel and reboot:
+
+```bash
+sudo apt install linux-modules-nvidia-595-open-$(uname -r)    # or: sudo ubuntu-drivers install
+```
+
+Note: on the CPU the GPU build of ONNX Runtime is ~20 % slower than the CPU build, so leave out `--gpu` on a PC without an NVIDIA GPU.
 
 Without ONNX Runtime the application still builds; the segmentation mode is then disabled. CMake reports `ONNX Runtime found … (point cloud segmentation enabled)` when it is used.
 
@@ -194,7 +205,8 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
     "model": "models/segformer-b0-ade",
     "input_size": 512,
     "threads": 0,
-    "min_confidence": 0.0
+    "min_confidence": 0.0,
+    "device": "auto"
   }
 }
 ```
@@ -206,6 +218,7 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
   * `input_size`: long side of the network input in pixels (the image is scaled to it, aspect ratio kept). Smaller is faster and coarser
   * `threads`: ONNX Runtime threads, `0` = all cores
   * `min_confidence`: pixels where the model's class probability is lower stay unlabelled (grey), `0` = label everything
+  * `device`: `auto` (default: the GPU when one is usable, else the CPU), `gpu` (same, but warns when it falls back to the CPU) or `cpu`. The **GPU / CPU** selector in the lidar tile overrides it while the application runs
 * The file is searched in this order:
   1. the path given as first argument of `qt_example_full`
   2. `./config/sensors.json`
@@ -228,7 +241,7 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
 | `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the bird's-eye view, `--blobs 50` to show only the blobs of at least 50 points in it |
-| `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found) |
+| `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found). `--device cpu\|gpu\|auto` picks where it runs, to compare GPU and CPU |
 | `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
 ## Using the application
@@ -278,11 +291,12 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
   | Control | Function |
   |---|---|
   | **Colour** selector | distance, camera RGB or segmentation (see [Point cloud colours](#point-cloud-colours)) |
+  | **GPU / CPU** | segmentation mode: where the segmentation model runs. Starts on the GPU when one is usable; hover it for why the GPU is not used. Switching reloads the model (a second or two) |
   | **Image overlay** | segmentation mode: the camera tiles show the classes on top of the images |
   | **Blobs** | segmentation mode: only the connected objects larger than the **Min. blob size** slider, with a circle around each (see [Blob view](#blob-view)) |
   | **Bird's-eye view** | the point cloud from above, projected on the ground plane (see [Bird's-eye view](#birds-eye-view)) |
 
-  Under the view: the class legend (segmentation mode), the blob size slider (blob view) and the mouse hints.
+  Under the view: the class legend (segmentation mode, with the time per scan and where the model ran), the blob size slider (blob view) and the mouse hints.
 * **Point cloud view (3D):**
   * left drag: rotate
   * right/middle drag: pan
@@ -380,7 +394,7 @@ The check boxes and the **Blobs** button in the lidar tile header change how the
 
 ### Image overlay
 
-**Image overlay** (segmentation mode): the camera tiles show the segmented frames with the class colours blended on top, instead of the live frames. They come from the same scan as the point cloud, so tiles and point cloud always show the same moment; they update at the segmentation rate (~4 Hz on the CPU).
+**Image overlay** (segmentation mode): the camera tiles show the segmented frames with the class colours blended on top, instead of the live frames. They come from the same scan as the point cloud, so tiles and point cloud always show the same moment; they update at the segmentation rate (~4 Hz on the CPU, faster on the GPU).
 
 ### Blob view
 

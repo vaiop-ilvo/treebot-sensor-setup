@@ -16,6 +16,7 @@ struct SegmentationConfig {
     int inputSize = 512;        // Long side of the network input in pixels (the short side keeps the aspect ratio)
     int threads = 0;            // ONNX Runtime threads, 0 = all cores
     float minConfidence = 0.0f; // Pixels with a lower class probability are UNKNOWN
+    std::string device = "auto"; // auto (GPU when available, else CPU), gpu (CPU when the GPU fails) or cpu
 };
 
 struct SensorConfig {

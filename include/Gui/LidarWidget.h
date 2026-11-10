@@ -14,6 +14,7 @@
 #include <Gui/PointCloudWidget.h>
 #include <Gui/SensorHeader.h>
 #include <Utils/PointCloudColor.h>
+#include <Utils/Segmenter.h>
 
 class LidarWidget : public QFrame {
 
@@ -49,12 +50,19 @@ public:
     bool imageOverlay() const;
     void onImageOverlayChanged(std::function<void(bool)> callback);
 
+    // Device drop-down of the segmentation model (segmentation mode): GPU or CPU.
+    // Shows where the model runs, without calling the callback; gpuError (tooltip) is why the GPU is not used.
+    void setSegmentationDevice(Segmenter::Device device, const QString& gpuError = {});
+    // Called when the user picks the other device
+    void onSegmentationDeviceChanged(std::function<void(Segmenter::Device)> callback);
+
 private:
     SensorHeader* header;
     PointCloudWidget* pointCloudWidget;
     BirdEyeWidget* birdEyeWidget;
     QCheckBox* birdEyeBox;      // 3D view or bird's-eye view on the ground plane
     QCheckBox* overlayBox;
+    QComboBox* deviceBox;       // GPU or CPU for the segmentation model
     QToolButton* blobButton;    // Blob view: connected points of a class, small blobs filtered out (segmentation mode)
     QSlider* blobSlider;        // Minimum blob size, logarithmic (see minBlobPoints)
     QLabel* blobSizeLabel;

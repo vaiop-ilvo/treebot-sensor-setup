@@ -1,6 +1,7 @@
 // Segments camera images with the segmentation model, as the main application does in segmentation mode.
-// Usage: segment_image <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N]
+// Usage: segment_image <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N] [--device auto|gpu|cpu]
 // Writes <out dir>/<image name>_seg.png: the image with the class colours on top, and prints the classes found.
+// With several images it also times them all in one call, as the application segments the cameras of a scan.
 #include <Utils/Segmenter.h>
 
 #include <opencv2/imgcodecs.hpp>
@@ -16,7 +17,7 @@
 int main(int argc, char* argv[])
 {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N]\n";
+        std::cerr << "Usage: " << argv[0] << " <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N] [--device auto|gpu|cpu]\n";
         return 1;
     }
     SegmentationConfig config;
@@ -29,6 +30,8 @@ int main(int argc, char* argv[])
             config.inputSize = std::stoi(argv[++i]);
         } else if (arg == "--threads" && i + 1 < argc) {
             config.threads = std::stoi(argv[++i]);
+        } else if (arg == "--device" && i + 1 < argc) {
+            config.device = argv[++i];
         } else {
             images.push_back(arg);
         }
@@ -39,7 +42,12 @@ int main(int argc, char* argv[])
         std::cerr << segmenter.error() << "\n";
         return 1;
     }
+    std::cout << "Running on the " << Segmenter::deviceName(segmenter.device()) << "\n";
+    if (!segmenter.gpuError().empty() && config.device != "cpu") {
+        std::cout << "  (not on the GPU: " << segmenter.gpuError() << ")\n";
+    }
     std::filesystem::create_directories(outDir);
+    std::vector<cv::Mat> allImages;
     const auto& names = segmenter.classNames();
     const auto& palette = segmenter.palette();
 
@@ -51,6 +59,7 @@ int main(int argc, char* argv[])
         }
         cv::Mat rgb;
         cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+        allImages.push_back(rgb);
 
         segmenter.segment(rgb);     // Warm-up: the first run allocates the buffers
         const auto tic = std::chrono::steady_clock::now();
@@ -79,6 +88,14 @@ int main(int argc, char* argv[])
             std::cout << " " << name << " " << (100 * counts[label] / static_cast<int>(labels.total())) << "%";
         }
         std::cout << "\n";
+    }
+
+    if (allImages.size() > 1) {
+        segmenter.segment(allImages);   // Warm-up for the batch size
+        const auto tic = std::chrono::steady_clock::now();
+        segmenter.segment(allImages);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tic).count();
+        std::cout << "All " << allImages.size() << " images in one call: " << ms << " ms\n";
     }
     return 0;
 }
