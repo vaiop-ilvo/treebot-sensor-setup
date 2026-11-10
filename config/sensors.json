@@ -19,6 +19,17 @@
     "input_size": 512,
     "threads": 0,
     "min_confidence": 0.0,
-    "device": "auto"
+    "device": "auto",
+    "ignore_other_classes": true,
+    "merge_classes": {
+      "wall/building": ["wall", "building", "house", "skyscraper", "hovel", "tower"],
+      "plant/tree": ["tree", "plant", "palm", "flower", "pole"],
+      "vehicle": ["car", "truck", "van", "bus", "bicycle", "minibike", "boat", "ship", "airplane"],
+      "person/animal": ["person", "animal"]
+    }
+  },
+  "occupancy_map": {
+    "min_height": 0.5,
+    "max_height": 1.5
   }
 }

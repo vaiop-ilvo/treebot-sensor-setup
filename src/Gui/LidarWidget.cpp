@@ -51,8 +51,9 @@ LidarWidget::LidarWidget(QWidget* parent)
         updateViewControls();
         showCloud();
     });
-    birdEyeBox = new QCheckBox("Bird's-eye view", this);
-    birdEyeBox->setToolTip("Project the point cloud on the ground plane (detected in every scan) and show it from above");
+    birdEyeBox = new QCheckBox("Occupancy map", this);
+    birdEyeBox->setToolTip("The point cloud from above, projected on the ground plane (detected in every scan).\n"
+                           "Only the points in the height range of occupancy_map in sensors.json (min_height to max_height above the ground).");
     header->addTool(birdEyeBox);
     connect(birdEyeBox, &QCheckBox::toggled, this, [this](bool) {
         updateViewControls();
@@ -81,6 +82,14 @@ LidarWidget::LidarWidget(QWidget* parent)
     legendLabel->setStyleSheet(QString("color: %1; background: %2; border-radius: 6px; padding: 3px 8px;")
         .arg(Theme::viewportText.name(), Theme::viewport.name()));
     legendLabel->hide();
+
+    // Class grid, shown in the bird's-eye view in segmentation mode
+    gridBox = new QCheckBox("Class grid", this);
+    gridBox->setChecked(true);
+    gridBox->setToolTip("Occupancy map as a grid: the ground in cells (10 cm, larger when zoomed out), each filled with the most\n"
+                        "common class of its points. Objects cover the ground below them; the ground is drawn dimmer.\n"
+                        "Off: the individual points.");
+    connect(gridBox, &QCheckBox::toggled, this, [this](bool) { showCloud(); });
 
     // Blob size, shown while the blob view is on
     blobControls = new QWidget(this);
@@ -126,6 +135,7 @@ LidarWidget::LidarWidget(QWidget* parent)
     auto* footer = new QHBoxLayout();
     footer->setSpacing(12);
     footer->addWidget(legendLabel, 1);
+    footer->addWidget(gridBox, 0, Qt::AlignBottom);
     footer->addWidget(blobControls, 0, Qt::AlignBottom);
     footer->addWidget(hintLabel, 0, Qt::AlignRight | Qt::AlignBottom);
     layout->addLayout(footer);
@@ -176,6 +186,8 @@ void LidarWidget::showCloud() {
 
     // The cloud to show: everything, or only the points of the blobs that are large enough
     std::shared_ptr<std::vector<vaiop::QtPoint>> shown = lastCloud;
+    const bool labelled = lastLabels.size() == lastCloud->size();
+    std::vector<uint8_t> shownLabels = labelled && birdEye ? lastLabels : std::vector<uint8_t>{};
     std::vector<Blob> blobs;
     if (blobView) {
         // The ground would connect everything on it into one blob
@@ -190,9 +202,13 @@ void LidarWidget::showCloud() {
         BlobResult result = findBlobs(*lastCloud, lastLabels, lastPalette, minBlobPoints(), BLOB_LINK_DISTANCE, include);
         shown = std::make_shared<std::vector<vaiop::QtPoint>>();
         shown->reserve(lastCloud->size() / 2);
+        shownLabels.clear();
         for (size_t i = 0; i < lastCloud->size(); ++i) {
             if (result.pointBlob[i] >= 0) {
                 shown->push_back((*lastCloud)[i]);
+                if (birdEye) {
+                    shownLabels.push_back(lastLabels[i]);
+                }
             }
         }
         blobs = std::move(result.blobs);
@@ -201,7 +217,8 @@ void LidarWidget::showCloud() {
     updateBlobLabel();
 
     if (birdEye) {
-        birdEyeWidget->setPoints(projectToGround(*shown, groundPlane), groundPlane, projectToGround(blobs, groundPlane));
+        birdEyeWidget->setClassGrid(gridBox->isChecked() && labelled);
+        birdEyeWidget->setPoints(projectToGround(*shown, groundPlane, &shownLabels), groundPlane, projectToGround(blobs, groundPlane));
     } else {
         pointCloudWidget->setPointCloud(shown);
         pointCloudWidget->setBlobs(std::move(blobs));
@@ -219,6 +236,7 @@ void LidarWidget::updateViewControls() {
     deviceBox->setEnabled(segmentation);
     blobButton->setEnabled(segmentation);
     blobControls->setVisible(segmentation && blobButton->isChecked());
+    gridBox->setVisible(segmentation && birdEye);
 }
 
 bool LidarWidget::imageOverlay() const {
@@ -227,6 +245,10 @@ bool LidarWidget::imageOverlay() const {
 
 void LidarWidget::onImageOverlayChanged(std::function<void(bool)> callback) {
     connect(overlayBox, &QCheckBox::toggled, this, [this, callback](bool) { callback(imageOverlay()); });
+}
+
+void LidarWidget::setOccupancyHeightRange(float minHeight, float maxHeight) {
+    birdEyeWidget->setHeightRange(minHeight, maxHeight);
 }
 
 void LidarWidget::setSegmentationDevice(Segmenter::Device device, const QString& gpuError) {

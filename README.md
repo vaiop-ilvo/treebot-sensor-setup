@@ -10,7 +10,7 @@ A Qt5 desktop application that records synchronised data from the VAIOP treebot 
 
 The GUI shows the live camera images and the point cloud, and when recording it writes images, point clouds and a CSV log with timestamps and robot metadata.
 
-With the lidar–camera calibration (`config/calib.json`) the point cloud can be coloured by distance, by the **camera colours** or by the classes of a **segmentation model** run on the camera images. On top of that the lidar tile offers a **bird's-eye view** on the detected ground plane, a **blob view** that groups segmented points into objects and filters them on size, and an **overlay** of the segmentation on the camera images. See [Point cloud colours](#point-cloud-colours) and [Lidar views](#lidar-views).
+With the lidar–camera calibration (`config/calib.json`) the point cloud can be coloured by distance, by the **camera colours** or by the classes of a **segmentation model** run on the camera images. On top of that the lidar tile offers an **occupancy map** (the points from above, on the detected ground plane), a **blob view** that groups segmented points into objects and filters them on size, and an **overlay** of the segmentation on the camera images. See [Point cloud colours](#point-cloud-colours) and [Lidar views](#lidar-views).
 
 ![The four camera views of the rig (virtual vineyard)](img/virtual-vineyard-image.png)
 
@@ -206,18 +206,31 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
     "input_size": 512,
     "threads": 0,
     "min_confidence": 0.0,
-    "device": "auto"
-  }
+    "device": "auto",
+    "ignore_other_classes": true,
+    "merge_classes": {
+      "wall/building": ["wall", "building", "house", "skyscraper", "hovel", "tower"],
+      "plant/tree": ["tree", "plant", "palm", "flower", "pole"],
+      "vehicle": ["car", "truck", "van", "bus", "bicycle", "minibike", "boat", "ship", "airplane"],
+      "person/animal": ["person", "animal"]
+    }
+  },
+  "occupancy_map": { "min_height": 0.2, "max_height": 3.0 }
 }
 ```
 
 * `rotation`: `cw`, `ccw`, `180`, or leave it out for no rotation.
+* `occupancy_map`: height range of the [occupancy map](#occupancy-map): only the points from `min_height` up to `max_height` metres above the fitted ground plane are shown (default 0.2–3.0 m: the ground and e.g. a hall ceiling are left out). A negative `min_height` includes the ground.
 * `pointcloud_color`: initial colouring of the point cloud, `distance` (default), `rgb` or `segmentation` (falls back to `distance` when no model is available). It can be changed in the lidar tile while the application runs (see [Point cloud colours](#point-cloud-colours)).
 * `segmentation` (optional): the model for the segmentation colour mode.
   * `model`: folder with `model.onnx` and `config.json` (class names), relative to the repository root
   * `input_size`: long side of the network input in pixels (the image is scaled to it, aspect ratio kept). Smaller is faster and coarser
   * `threads`: ONNX Runtime threads, `0` = all cores
   * `min_confidence`: pixels where the model's class probability is lower stay unlabelled (grey), `0` = label everything
+  * `ignore_other_classes`: `true` = only the classes of `merge_classes` are labelled; all others (sky, floor, ceiling, road, grass, furniture, …) stay unlabelled. They still take part in the model's choice, so a sky pixel stays unlabelled instead of getting the nearest of the kept classes. The config uses this to keep only walls/buildings, plants/trees (with poles: the bamboo sticks next to young trees, which the robot has to steer around), vehicles and people/animals (ADE20K has no tractor class: a tractor is usually seen as truck or car)
+  * `ignore_classes`: classes of the model that stay unlabelled (grey points, no overlay, not in the legend, grid or blobs), e.g. the ceiling and floor of a hall. A pixel where such a class wins is not given the next best class
+  * `merge_classes`: classes combined into one, as `"name": [classes]`. Their probabilities are added before the best class is chosen, so a pixel that is 30 % tree and 30 % plant is 60 % `plant/tree`. The group gets the colour and id of its first class
+  * Class names are those of the model's `config.json` (`id2label`); unknown names are reported and left out. `segment_image` and `colorize_cloud` use these settings too
   * `device`: `auto` (default: the GPU when one is usable, else the CPU), `gpu` (same, but warns when it falls back to the CPU) or `cpu`. The **GPU / CPU** selector in the lidar tile overrides it while the application runs
 * The file is searched in this order:
   1. the path given as first argument of `qt_example_full`
@@ -240,7 +253,7 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
-| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the bird's-eye view, `--blobs 50` to show only the blobs of at least 50 points in it |
+| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the occupancy map (height range of `occupancy_map` in `sensors.json`), `--blobs 50` to show only the blobs of at least 50 points in it, `--grid 0.1` to draw it as a class grid of 10 cm cells |
 | `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found). `--device cpu\|gpu\|auto` picks where it runs, to compare GPU and CPU |
 | `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
@@ -294,7 +307,7 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
   | **GPU / CPU** | segmentation mode: where the segmentation model runs. Starts on the GPU when one is usable; hover it for why the GPU is not used. Switching reloads the model (a second or two) |
   | **Image overlay** | segmentation mode: the camera tiles show the classes on top of the images |
   | **Blobs** | segmentation mode: only the connected objects larger than the **Min. blob size** slider, with a circle around each (see [Blob view](#blob-view)) |
-  | **Bird's-eye view** | the point cloud from above, projected on the ground plane (see [Bird's-eye view](#birds-eye-view)) |
+  | **Occupancy map** | the point cloud from above, projected on the ground plane, only the points in the configured height range (see [Occupancy map](#occupancy-map)) |
 
   Under the view: the class legend (segmentation mode, with the time per scan and where the model ran), the blob size slider (blob view) and the mouse hints.
 * **Point cloud view (3D):**
@@ -302,7 +315,7 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
   * right/middle drag: pan
   * scroll: zoom
   * double-click: reset the view
-* **Bird's-eye view:** drag to pan, scroll to zoom, double-click to reset.
+* **Occupancy map:** drag to pan, scroll to zoom, double-click to reset.
 * **Missing sensors:** a sensor that cannot be reached is shown as offline and the application keeps running.
 * **Status bar:** the trigger source, the write queue, the loaded config file, the number of calibrated cameras and the segmentation model (or `off`).
 
@@ -390,7 +403,7 @@ Segmentation (`Segmenter`, `SegmentationWorker` in `src/Utils/`):
 
 ## Lidar views
 
-The check boxes and the **Blobs** button in the lidar tile header change how the (coloured) point cloud is shown. They can be combined: e.g. segmentation + blobs + bird's-eye view gives a 2D map of the objects around the robot.
+The check boxes and the **Blobs** button in the lidar tile header change how the (coloured) point cloud is shown. They can be combined: e.g. segmentation + blobs + occupancy map gives a 2D map of the objects around the robot.
 
 ### Image overlay
 
@@ -403,15 +416,16 @@ The check boxes and the **Blobs** button in the lidar tile header change how the
 * Connected points of the same class form a blob: points closer than ~0.3 m are connected (cells of 0.3 m with their 26 neighbours). Classes never mix, so a person next to a wall stays a separate blob.
 * The ground plane (points up to 15 cm above it) is left out, as it would connect everything standing on it.
 * The **Min. blob size** slider under the view (5 to 5000 points, logarithmic) filters on the number of points: blobs with fewer points are removed from the point cloud. The label next to it shows the threshold and the number of blobs left.
-* Each blob is shown with a translucent circle in its class colour around it, at its centroid, covering 90% of its points. In 3D the circles always face the viewer; in the bird's-eye view they are drawn on the ground.
+* Each blob is shown with a translucent circle in its class colour around it, at its centroid, covering 90% of its points. In 3D the circles always face the viewer; in the occupancy map they are drawn on the ground.
 
-### Bird's-eye view
+### Occupancy map
 
-The **Bird's-eye view** check box in the lidar tile shows the point cloud from above, projected on the ground (`GroundPlane` in `src/Utils/`, `BirdEyeWidget` in `src/Gui/`). It works with every colour mode; with segmentation it gives a 2D map of the classes around the robot.
+The **Occupancy map** check box in the lidar tile shows the point cloud from above, projected on the ground (`GroundPlane` in `src/Utils/`, `BirdEyeWidget` in `src/Gui/`), keeping only the points in a height range above the ground: `occupancy_map` in `sensors.json`, by default 0.2–3.0 m (see [Configuration](#configuration)). So the ground itself and anything high up (a hall ceiling, a canopy) are left out, and what remains is what occupies the space the robot drives through. It works with every colour mode; with segmentation it gives a 2D map of the classes around the robot.
 
 * **Ground plane**, fitted in every scan (~1 ms): RANSAC over planes through 3 points within 1–25 m, keeping the plane with the most points within 8 cm. Only near-horizontal planes (normal within 35° of the lidar z axis) at least 20 cm below the lidar count, so walls and the ceiling are never chosen. The plane is refined by least squares and smoothed over time. On the rig the lidar is mounted ~1.0 m above the floor and tilted ~16°.
-* **Projection:** every point gets its position on the ground plane (forward = lidar x projected on the plane, shown up) and its height above it. Where points overlap from above, the highest is drawn, so objects cover the ground below them. The ground (up to 15 cm) is drawn dimmer, and points more than 4 m above the ground (e.g. a hall ceiling) are left out.
-* The view shows rings around the lidar (spacing adapts to the zoom), the lidar as a green triangle and the fitted plane (lidar height, tilt). Scroll to zoom, drag to pan, double-click to reset.
+* **Projection:** every point gets its position on the ground plane (forward = lidar x projected on the plane, shown up) and its height above it. Where points overlap from above, the highest is drawn, so objects cover the ground below them. Points outside the configured height range are left out. When the range includes the ground (negative `min_height`), the ground (up to 15 cm) is drawn dimmer.
+* The view shows rings around the lidar (spacing adapts to the zoom), the lidar as a green triangle, the height range and the fitted plane (lidar height, tilt). Scroll to zoom, drag to pan, double-click to reset.
+* **Class grid** (segmentation mode, check box under the view, on by default): the ground is divided in square cells of 10 cm (20 cm, 50 cm, … when zoomed out, so a cell stays a few pixels wide), each filled with the most common class of its points (`renderBirdEyeGrid`, ~6 ms). Points above the ground outvote the ground points in their cell, so objects cover the ground below them; ground cells are drawn dimmer, and cells with only points not seen by a camera grey. This gives a closed map instead of loose points. Off: the individual points.
 
 ## Calibration file
 
@@ -441,12 +455,12 @@ include/, src/
 ├── Utils/PointCloudColor Point cloud colour modes: distance, camera RGB / class maps (projection + occlusion test)
 ├── Utils/Segmenter       Semantic segmentation of an image with an ONNX model (ONNX Runtime)
 ├── Utils/SegmentationWorker Background thread: segments the camera images and colours the point cloud by class
-├── Utils/GroundPlane     Ground plane fit (RANSAC) and projection of the cloud on it (bird's-eye view)
+├── Utils/GroundPlane     Ground plane fit (RANSAC) and projection of the cloud on it (occupancy map)
 ├── Utils/Blobs           Blob view: connected points of a class, filtered on their number of points
 ├── Utils/MetaData.hpp    Metadata structs for robot, lidar and cameras
 ├── Gui/                  MainWindow (main app), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
 │                         Recording (reads a recording folder back for the replay),
-│                         SensorHeader, PointCloudWidget (OpenGL 3.3), BirdEyeWidget, small example windows
+│                         SensorHeader, PointCloudWidget (OpenGL 3.3), BirdEyeWidget (occupancy map), small example windows
 └── Test/                 The example executables (see table above)
 config/                   sensors.json (addresses, colour mode, segmentation model), calib.json (intrinsics / extrinsics)
 scripts/download_models.sh  Downloads ONNX Runtime and the segmentation model(s)

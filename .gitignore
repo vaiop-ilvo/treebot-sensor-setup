@@ -8,6 +8,7 @@ python/**/*.dll
 python/**/*.pyd
 
 /build
+/build-*/
 python/artifacts/
 
 # visual studio

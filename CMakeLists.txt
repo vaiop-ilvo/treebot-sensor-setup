@@ -42,6 +42,9 @@ endif()
 if(NOT WIN32 AND ENABLE_ASAN)
     message(STATUS "Note: Compiling with asan address sanitization and leak checking")
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    # Eigen uses its own aligned malloc/free under ASAN, but the (uninstrumented) Ouster SDK returns matrices
+    # allocated with plain malloc: freeing them here would be reported as a heap-buffer-overflow
+    add_compile_definitions(EIGEN_MALLOC_ALREADY_ALIGNED=1)
     add_link_options(-fsanitize=address)
 else()
     message(STATUS "ASAN disabled: to enable, run: cmake -DENABLE_ASAN=ON ..")

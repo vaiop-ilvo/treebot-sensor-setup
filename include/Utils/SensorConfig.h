@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 struct CameraInfo {
@@ -17,6 +18,16 @@ struct SegmentationConfig {
     int threads = 0;            // ONNX Runtime threads, 0 = all cores
     float minConfidence = 0.0f; // Pixels with a lower class probability are UNKNOWN
     std::string device = "auto"; // auto (GPU when available, else CPU), gpu (CPU when the GPU fails) or cpu
+    std::vector<std::string> ignoreClasses;     // Classes left unlabelled (e.g. ceiling, floor)
+    // Classes combined into one (name, member classes): their probabilities are added, e.g. plant/tree
+    std::vector<std::pair<std::string, std::vector<std::string>>> mergeClasses;
+    bool ignoreOtherClasses = false;            // Only the merged classes are labelled, all others stay unlabelled
+};
+
+// Settings of the occupancy map (the "occupancy_map" block of sensors.json): the lidar points seen from above
+struct OccupancyMapConfig {
+    float minHeight = 0.2f;     // Only points from this height above the ground plane [m] (above 0: the ground is left out)
+    float maxHeight = 3.0f;     // up to this height [m] (e.g. leaves out a hall ceiling or overhanging branches)
 };
 
 struct SensorConfig {
@@ -27,6 +38,7 @@ struct SensorConfig {
     std::string calibFileName = "config/calib.json";
     std::string pointCloudColor = "distance";  // Initial point cloud colouring: distance, rgb or segmentation
     SegmentationConfig segmentation;
+    OccupancyMapConfig occupancyMap;
     std::string sourceFile;     // File the config was read from, empty when the defaults are used
 
     // The rig defaults (used when no config file is found)

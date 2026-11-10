@@ -1,14 +1,16 @@
 // Colours a recorded point cloud with recorded camera images, as the main application does in RGB mode,
 // or with the class colours of a segmentation model (segmentation mode) when --model is given.
-// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>]
+// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>]
 // The output is a binary PLY with x, y, z, red, green, blue. --bev also fits the ground plane and writes the
 // coloured cloud projected on it (bird's-eye view, forward up, rings every 5 m). With --model, --bev and --blobs, the
-// bird's-eye view shows only the blobs of at least <min points> points, with their circles (as the Blobs button).
+// bird's-eye view shows only the blobs of at least <min points> points, with their circles (as the Blobs button). With --model and
+// --grid the bird's-eye view is the class grid: cells of <cell size> metres filled with their most common class.
 #include <Utils/Blobs.h>
 #include <Utils/GroundPlane.h>
 #include <Utils/LidarCamera.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Segmenter.h>
+#include <Utils/SensorConfig.h>
 
 #include <pcl/io/ply_io.h>
 #include <pcl/point_types.h>
@@ -24,7 +26,7 @@
 int main(int argc, char* argv[])
 {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>]\n";
+        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>]\n";
         return 1;
     }
     const std::string calibFile = argv[1];
@@ -42,9 +44,12 @@ int main(int argc, char* argv[])
 
     std::vector<CameraCalib> calibs;
     std::vector<cv::Mat> imagesRGB;
-    SegmentationConfig segConfig;
+    // Settings of config/sensors.json (input size, ignored and merged classes, ...), with the model of --model
+    SegmentationConfig segConfig = sensorConfig().segmentation;
+    segConfig.modelDir.clear();
     std::string bevFile;
     uint32_t minBlobPoints = 0;
+    float gridCell = 0.0f;
     for (int i = 4; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) {
@@ -53,6 +58,10 @@ int main(int argc, char* argv[])
         }
         if (arg == "--blobs" && i + 1 < argc) {
             minBlobPoints = static_cast<uint32_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--grid" && i + 1 < argc) {
+            gridCell = std::stof(argv[++i]);
             continue;
         }
         if (arg == "--bev" && i + 1 < argc) {
@@ -128,8 +137,11 @@ int main(int argc, char* argv[])
         BirdEyeView view;
         view.size = cv::Size(900, 900);
         view.metersPerPixel = 0.035f;
+        view.minHeight = sensorConfig().occupancyMap.minHeight;     // Height range of the occupancy map (sensors.json)
+        view.maxHeight = sensorConfig().occupancyMap.maxHeight;
         // Blob view: only the points of the blobs that are large enough (ground left out, as in the application)
         std::vector<vaiop::QtPoint> shown = cloud;
+        std::vector<uint8_t> shownLabels = labels;
         std::vector<Blob> blobs;
         if (minBlobPoints > 0 && !labels.empty()) {
             std::vector<uint8_t> include(cloud.size());
@@ -142,14 +154,20 @@ int main(int argc, char* argv[])
             std::cout << result.blobs.size() << " blobs of at least " << minBlobPoints << " points in "
                       << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count() << " ms\n";
             shown.clear();
+            shownLabels.clear();
             for (size_t i = 0; i < cloud.size(); ++i) {
                 if (result.pointBlob[i] >= 0) {
                     shown.push_back(cloud[i]);
+                    shownLabels.push_back(labels[i]);
                 }
             }
             blobs = result.blobs;
         }
-        cv::Mat bev = renderBirdEye(projectToGround(shown, plane), view, cv::Vec3b(17, 20, 25));
+        const std::vector<BirdEyePoint> groundPoints = projectToGround(shown, plane, &shownLabels);
+        const auto t2 = std::chrono::steady_clock::now();
+        cv::Mat bev = gridCell > 0.0f && !labels.empty() ? renderBirdEyeGrid(groundPoints, view, gridCell, cv::Vec3b(17, 20, 25))
+                                                         : renderBirdEye(groundPoints, view, cv::Vec3b(17, 20, 25));
+        std::cout << "Bird's-eye view rendered in " << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count() << " ms\n";
         for (const BirdEyeBlob& blob : projectToGround(blobs, plane)) {
             if (blob.height < view.minHeight || blob.height > view.maxHeight) {
                 continue;

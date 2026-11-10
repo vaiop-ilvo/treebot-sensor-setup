@@ -46,6 +46,9 @@ public:
     void setLegend(const std::vector<LegendEntry>& entries, const QString& note = {});
     void clearLegend();
 
+    // Occupancy map: only the points from minHeight up to maxHeight above the ground plane [m]
+    void setOccupancyHeightRange(float minHeight, float maxHeight);
+
     // "Image overlay" check box (segmentation mode only): show the classes on the camera images
     bool imageOverlay() const;
     void onImageOverlayChanged(std::function<void(bool)> callback);
@@ -60,7 +63,8 @@ private:
     SensorHeader* header;
     PointCloudWidget* pointCloudWidget;
     BirdEyeWidget* birdEyeWidget;
-    QCheckBox* birdEyeBox;      // 3D view or bird's-eye view on the ground plane
+    QCheckBox* birdEyeBox;      // 3D view or occupancy map (top-down view on the ground plane)
+    QCheckBox* gridBox;         // Occupancy map as a class grid (segmentation mode)
     QCheckBox* overlayBox;
     QComboBox* deviceBox;       // GPU or CPU for the segmentation model
     QToolButton* blobButton;    // Blob view: connected points of a class, small blobs filtered out (segmentation mode)

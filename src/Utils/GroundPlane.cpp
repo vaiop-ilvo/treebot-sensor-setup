@@ -5,6 +5,8 @@
 #include <limits>
 #include <random>
 
+#include <opencv2/imgproc.hpp>
+
 namespace {
     // Candidate points: within this range of the lidar [m] (the ground is sparse and noisy far away)
     constexpr float MIN_RANGE = 1.0f;
@@ -157,7 +159,8 @@ namespace {
     }
 }
 
-std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane)
+std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane,
+                                          const std::vector<uint8_t>* labels)
 {
     std::vector<BirdEyePoint> points;
     if (!plane.valid) {
@@ -166,10 +169,13 @@ std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& clo
     Eigen::Vector3f forward, left;
     groundAxes(plane, forward, left);
 
+    const bool labelled = labels && labels->size() == cloud.size();
     points.reserve(cloud.size());
-    for (const vaiop::QtPoint& q : cloud) {
+    for (size_t i = 0; i < cloud.size(); ++i) {
+        const vaiop::QtPoint& q = cloud[i];
         const Eigen::Vector3f p(q.position.x(), q.position.y(), q.position.z());
-        points.push_back({forward.dot(p), left.dot(p), plane.height(p), q.color});
+        points.push_back({forward.dot(p), left.dot(p), plane.height(p), q.color,
+                          labelled ? (*labels)[i] : BirdEyePoint::NO_LABEL});
     }
     return points;
 }
@@ -222,6 +228,93 @@ cv::Mat renderBirdEye(const std::vector<BirdEyePoint>& points, const BirdEyeView
                 }
             }
         }
+    }
+    return image;
+}
+
+cv::Mat renderBirdEyeGrid(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, float cellSize, const cv::Vec3b& bg)
+{
+    cv::Mat image(view.size, CV_8UC3, cv::Scalar(bg[0], bg[1], bg[2]));
+    if (cellSize <= 0.0f) {
+        return image;
+    }
+
+    // Cells covering the view (plus a margin), indexed by (forward, left) cell coordinates
+    const float halfForward = 0.5f * view.size.height * view.metersPerPixel + cellSize;
+    const float halfLeft = 0.5f * view.size.width * view.metersPerPixel + cellSize;
+    const int f0 = static_cast<int>(std::floor((view.center.x - halfForward) / cellSize));
+    const int l0 = static_cast<int>(std::floor((view.center.y - halfLeft) / cellSize));
+    const int nForward = static_cast<int>(std::ceil(2.0f * halfForward / cellSize)) + 1;
+    const int nLeft = static_cast<int>(std::ceil(2.0f * halfLeft / cellSize)) + 1;
+
+    // Vote per point: cell, priority (2 = labelled object, 1 = labelled ground, 0 = unlabelled), label.
+    // Sorted by cell, the votes of a cell are consecutive and its highest priority comes first.
+    struct Vote {
+        int32_t cell;
+        uint8_t priority;
+        uint8_t label;
+        uint32_t point;
+    };
+    std::vector<Vote> votes;
+    votes.reserve(points.size());
+    for (uint32_t i = 0; i < points.size(); ++i) {
+        const BirdEyePoint& p = points[i];
+        if (p.height < view.minHeight || p.height > view.maxHeight) {
+            continue;
+        }
+        const int f = static_cast<int>(std::floor(p.forward / cellSize)) - f0;
+        const int l = static_cast<int>(std::floor(p.left / cellSize)) - l0;
+        if (f < 0 || f >= nForward || l < 0 || l >= nLeft) {
+            continue;
+        }
+        const bool labelled = p.label != BirdEyePoint::NO_LABEL;
+        const uint8_t priority = !labelled ? 0 : (p.height > view.groundHeight ? 2 : 1);
+        votes.push_back({f * nLeft + l, priority, p.label, i});
+    }
+    std::sort(votes.begin(), votes.end(), [](const Vote& a, const Vote& b) {
+        return a.cell != b.cell ? a.cell < b.cell : a.priority > b.priority;
+    });
+
+    std::vector<uint32_t> counts(256, 0);
+    for (size_t start = 0; start < votes.size();) {
+        // Only the votes of the highest priority in this cell count
+        const int32_t cell = votes[start].cell;
+        const uint8_t priority = votes[start].priority;
+        size_t end = start;
+        while (end < votes.size() && votes[end].cell == cell && votes[end].priority == priority) {
+            ++end;
+        }
+        // Most common label; its first point gives the colour (all points of a class have the class colour)
+        uint32_t bestCount = 0;
+        size_t best = start;
+        for (size_t k = start; k < end; ++k) {
+            const uint32_t count = ++counts[votes[k].label];
+            if (count > bestCount) {
+                bestCount = count;
+                best = k;
+            }
+        }
+        for (size_t k = start; k < end; ++k) {
+            counts[votes[k].label] = 0;
+        }
+        while (end < votes.size() && votes[end].cell == cell) {
+            ++end;
+        }
+        start = end;
+
+        // Fill the cell: forward is up, left is left
+        const BirdEyePoint& p = points[votes[best].point];
+        const float gain = priority == 2 ? 1.0f : 0.55f;
+        const cv::Scalar color(std::clamp(p.color.x() * gain, 0.0f, 1.0f) * 255.0f,
+                               std::clamp(p.color.y() * gain, 0.0f, 1.0f) * 255.0f,
+                               std::clamp(p.color.z() * gain, 0.0f, 1.0f) * 255.0f);
+        const float forward = static_cast<float>(cell / nLeft + f0) * cellSize;
+        const float left = static_cast<float>(cell % nLeft + l0) * cellSize;
+        const cv::Point2f topLeft = view.toPixel(forward + cellSize, left + cellSize);
+        const cv::Point2f bottomRight = view.toPixel(forward, left);
+        const cv::Point a(static_cast<int>(std::floor(topLeft.x)), static_cast<int>(std::floor(topLeft.y)));
+        const cv::Point b(static_cast<int>(std::ceil(bottomRight.x)) - 1, static_cast<int>(std::ceil(bottomRight.y)) - 1);
+        cv::rectangle(image, a, cv::Point(std::max(a.x, b.x), std::max(a.y, b.y)), color, cv::FILLED);
     }
     return image;
 }

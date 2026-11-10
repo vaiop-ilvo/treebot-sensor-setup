@@ -3,6 +3,7 @@
 // Writes <out dir>/<image name>_seg.png: the image with the class colours on top, and prints the classes found.
 // With several images it also times them all in one call, as the application segments the cameras of a scan.
 #include <Utils/Segmenter.h>
+#include <Utils/SensorConfig.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -20,7 +21,8 @@ int main(int argc, char* argv[])
         std::cerr << "Usage: " << argv[0] << " <model dir> <out dir> <image.png> [<image.png> ...] [--size N] [--threads N] [--device auto|gpu|cpu]\n";
         return 1;
     }
-    SegmentationConfig config;
+    // Settings of config/sensors.json (input size, ignored and merged classes, ...), with the given model
+    SegmentationConfig config = sensorConfig().segmentation;
     config.modelDir = argv[1];
     const std::filesystem::path outDir = argv[2];
     std::vector<std::string> images;

@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <iostream>
+#include <limits>
 #include <map>
 
 #include <QFile>
@@ -26,7 +28,8 @@ namespace {
 
     // Recognisable colours for the classes that matter outdoors; the other classes get a generated colour
     const std::map<std::string, cv::Vec3b> NAMED_COLORS = {
-        {"sky", {110, 170, 235}},     {"tree", {30, 130, 40}},      {"plant", {100, 200, 60}},
+        {"sky", {110, 170, 235}},     {"tree", {30, 130, 40}},      {"plant/tree", {30, 150, 40}},
+        {"wall/building", {205, 185, 150}}, {"vehicle", {40, 80, 220}}, {"person/animal", {230, 40, 40}},      {"plant", {100, 200, 60}},
         {"grass", {160, 225, 100}},   {"field", {200, 205, 110}},   {"earth", {150, 105, 65}},
         {"sand", {220, 200, 140}},    {"floor", {175, 145, 115}},   {"road", {120, 120, 120}},
         {"sidewalk", {185, 185, 185}}, {"person", {230, 40, 40}},   {"car", {40, 80, 220}},
@@ -131,6 +134,10 @@ namespace {
 struct Segmenter::Impl {
     SegmentationConfig config;
     std::string error;
+    // Class of the model -> output label: itself, UNKNOWN (ignored) or the first member of its merge group
+    std::vector<uint8_t> outputLabel;
+    std::vector<std::vector<int>> groups;   // Members of each merge group
+    std::vector<uint8_t> inGroup;           // Per class: 1 when it belongs to a merge group
     Device device = Device::Cpu;
     std::string gpuError;
     std::vector<std::string> names;
@@ -155,14 +162,62 @@ Segmenter::Segmenter(const SegmentationConfig& config)
     if (impl->names.empty()) {
         return;
     }
+
+    // Ignored and merged classes
+    auto classId = [this](const std::string& name) {
+        const auto it = std::find(impl->names.begin(), impl->names.end(), name);
+        if (it == impl->names.end()) {
+            std::cerr << "Segmentation: no class \"" << name << "\" in the model, left out\n";
+            return -1;
+        }
+        return static_cast<int>(it - impl->names.begin());
+    };
+    const int nClasses = static_cast<int>(impl->names.size());
+    impl->outputLabel.resize(nClasses);
+    impl->inGroup.assign(nClasses, 0);
+    for (int k = 0; k < nClasses; ++k) {
+        impl->outputLabel[k] = static_cast<uint8_t>(std::min(k, static_cast<int>(UNKNOWN)));
+    }
+    for (const std::string& name : config.ignoreClasses) {
+        if (const int k = classId(name); k >= 0) {
+            impl->outputLabel[k] = UNKNOWN;
+        }
+    }
+    for (const auto& [groupName, memberNames] : config.mergeClasses) {
+        std::vector<int> members;
+        for (const std::string& name : memberNames) {
+            if (const int k = classId(name); k >= 0 && !impl->inGroup[k]) {
+                members.push_back(k);
+                impl->inGroup[k] = 1;
+            }
+        }
+        if (members.empty()) {
+            continue;
+        }
+        // The group is shown as its first member, renamed
+        for (const int k : members) {
+            impl->outputLabel[k] = impl->outputLabel[members.front()];
+        }
+        impl->names[members.front()] = groupName;
+        impl->groups.push_back(std::move(members));
+    }
+    if (config.ignoreOtherClasses) {
+        // They still compete in the model: a pixel where such a class wins stays unlabelled
+        for (int k = 0; k < nClasses; ++k) {
+            if (!impl->inGroup[k]) {
+                impl->outputLabel[k] = UNKNOWN;
+            }
+        }
+    }
     for (size_t i = 0; i < impl->names.size(); ++i) {
         const auto named = NAMED_COLORS.find(impl->names[i]);
         impl->palette.push_back(named != NAMED_COLORS.end() ? named->second : generatedColor(i));
     }
 
 #ifdef WITH_SEGMENTATION
-    // One environment for the whole program
-    static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "segmentation");
+    // One environment for the whole program. Never destroyed: destroying it at program exit (static destructors) can
+    // run after the CUDA runtime has shut down, which corrupts the heap when the model ran on the GPU
+    static Ort::Env& env = *new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "segmentation");
     const std::string modelFile = config.modelDir + "/model.onnx";
     auto makeOptions = [&config]() {
         Ort::SessionOptions options;
@@ -324,13 +379,30 @@ std::vector<cv::Mat> Segmenter::segment(const std::vector<cv::Mat>& imagesRGB)
             const float* logits = outputs[0].GetTensorData<float>() + b * nClasses * planeSize;
             cv::Mat labels(h, w, CV_8U);
             for (size_t p = 0; p < planeSize; ++p) {
-                int best = 0;
-                float bestScore = logits[p];
-                for (int k = 1; k < nClasses; ++k) {
+                // Best class, merge groups as one class: their score is log(sum(exp(logits))), so the comparison
+                // is on the summed softmax probabilities (the softmax denominator is the same for all classes)
+                int best = -1;
+                float bestScore = -std::numeric_limits<float>::infinity();
+                for (int k = 0; k < nClasses; ++k) {
                     const float score = logits[k * planeSize + p];
-                    if (score > bestScore) {
+                    if (score > bestScore && !(k < static_cast<int>(impl->inGroup.size()) && impl->inGroup[k])) {
                         bestScore = score;
                         best = k;
+                    }
+                }
+                for (const std::vector<int>& group : impl->groups) {
+                    float maxLogit = -std::numeric_limits<float>::infinity();
+                    for (const int k : group) {
+                        maxLogit = std::max(maxLogit, logits[k * planeSize + p]);
+                    }
+                    float sum = 0.0f;
+                    for (const int k : group) {
+                        sum += std::exp(logits[k * planeSize + p] - maxLogit);
+                    }
+                    const float score = maxLogit + std::log(sum);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = group.front();
                     }
                 }
                 if (minConfidence > 0.0f) {
@@ -343,7 +415,9 @@ std::vector<cv::Mat> Segmenter::segment(const std::vector<cv::Mat>& imagesRGB)
                         best = UNKNOWN;
                     }
                 }
-                labels.data[p] = static_cast<uint8_t>(std::min(best, static_cast<int>(UNKNOWN)));
+                labels.data[p] = best == UNKNOWN || best < 0 ? UNKNOWN
+                               : best < static_cast<int>(impl->outputLabel.size()) ? impl->outputLabel[best]
+                                                                                   : UNKNOWN;
             }
 
             // 5. Back to the image size (the output covers the whole image at a quarter of the input resolution)

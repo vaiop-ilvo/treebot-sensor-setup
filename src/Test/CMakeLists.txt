@@ -168,6 +168,7 @@ target_link_libraries(read_config
 )
 
 add_executable(colorize_cloud "colorize_cloud.cpp"
+  "${SRC_DIR}/Utils/SensorConfig.cpp"
   "${SRC_DIR}/Utils/Blobs.cpp"
   "${SRC_DIR}/Utils/GroundPlane.cpp"
   "${SRC_DIR}/Utils/LidarCamera.cpp"
@@ -200,6 +201,7 @@ target_link_libraries(capture_snapshot
 )
 
 add_executable(segment_image "segment_image.cpp"
+  "${SRC_DIR}/Utils/SensorConfig.cpp"
   "${SRC_DIR}/Utils/Segmenter.cpp"
 )
 target_link_libraries(segment_image

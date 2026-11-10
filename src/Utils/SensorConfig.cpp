@@ -104,6 +104,22 @@ SensorConfig SensorConfig::load(const std::string& path)
     config.segmentation.threads = segmentation["threads"].toInt(config.segmentation.threads);
     config.segmentation.minConfidence = static_cast<float>(segmentation["min_confidence"].toDouble(config.segmentation.minConfidence));
     config.segmentation.device = segmentation["device"].toString(QString::fromStdString(config.segmentation.device)).toStdString();
+    for (const QJsonValue& name : segmentation["ignore_classes"].toArray()) {
+        config.segmentation.ignoreClasses.push_back(name.toString().toStdString());
+    }
+    config.segmentation.ignoreOtherClasses = segmentation["ignore_other_classes"].toBool(config.segmentation.ignoreOtherClasses);
+    const QJsonObject merge = segmentation["merge_classes"].toObject();
+    for (auto it = merge.begin(); it != merge.end(); ++it) {
+        std::vector<std::string> members;
+        for (const QJsonValue& name : it.value().toArray()) {
+            members.push_back(name.toString().toStdString());
+        }
+        config.segmentation.mergeClasses.emplace_back(it.key().toStdString(), std::move(members));
+    }
+
+    const QJsonObject occupancy = root["occupancy_map"].toObject();
+    config.occupancyMap.minHeight = static_cast<float>(occupancy["min_height"].toDouble(config.occupancyMap.minHeight));
+    config.occupancyMap.maxHeight = static_cast<float>(occupancy["max_height"].toDouble(config.occupancyMap.maxHeight));
 
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();

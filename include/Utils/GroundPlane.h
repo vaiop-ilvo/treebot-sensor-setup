@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -36,10 +37,14 @@ struct BirdEyePoint {
     float left;         // Perpendicular to forward, to the left (lidar y side) [m]
     float height;       // Above the ground [m]
     QVector3D color;    // RGB [0, 1]
+    uint8_t label = NO_LABEL;   // Segmentation class, NO_LABEL when not segmented or not seen by a camera
+
+    static constexpr uint8_t NO_LABEL = 255;
 };
 
-// Projects the cloud on the ground plane
-std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane);
+// Projects the cloud on the ground plane. labels (optional, one per point): segmentation class per point
+std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane,
+                                          const std::vector<uint8_t>* labels = nullptr);
 
 // A blob in the bird's-eye view: its centre projected on the ground plane
 struct BirdEyeBlob {
@@ -70,3 +75,8 @@ struct BirdEyeView {
 // Renders the points top-down (RGB, CV_8UC3, background colour bg). Where points overlap, the highest is shown,
 // so objects are drawn on top of the ground below them.
 cv::Mat renderBirdEye(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, const cv::Vec3b& bg);
+
+// Class grid: the ground divided in square cells of cellSize metres, each filled with the most common class of its
+// points. Points above the ground (objects) outvote the ground in their cell, so objects cover the ground below them;
+// ground cells are drawn dimmer. Unlabelled points only count in cells without labelled points (grey = not seen).
+cv::Mat renderBirdEyeGrid(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, float cellSize, const cv::Vec3b& bg);

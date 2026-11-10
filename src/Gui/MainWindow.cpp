@@ -133,6 +133,7 @@ void MainWindow::setupUI()
         lidarWidget->setLegend({}, "Segmenting…");
     }
     lidarWidget->onColorModeChanged([this](ColorMode mode) { setColorMode(mode); });
+    lidarWidget->setOccupancyHeightRange(config.occupancyMap.minHeight, config.occupancyMap.maxHeight);
     const SegmentationWorker::DeviceStatus deviceStatus = segmentation->deviceStatus();
     lidarWidget->setSegmentationDevice(deviceStatus.device, QString::fromStdString(deviceStatus.gpuError));
     lidarWidget->onSegmentationDeviceChanged([this](Segmenter::Device device) {
