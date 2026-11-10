@@ -139,6 +139,9 @@ SegmentationWorker::Result SegmentationWorker::process(const Job& job)
     }
 
     result.tag = job.tag;
+    result.stamp = job.stamp;
+    result.plane = job.plane;
+    result.record = job.record;
     result.cloud = std::make_shared<std::vector<vaiop::QtPoint>>(*job.cloud);
     colorizer.colorizeLabels(*result.cloud, labelMaps, colors, &result.labels);
 

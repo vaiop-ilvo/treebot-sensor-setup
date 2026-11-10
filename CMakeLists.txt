@@ -103,6 +103,45 @@ else ()
     set(ONNXRUNTIME_LIBRARIES "")
 endif ()
 
+# ROS 2 (optional): recording to a rosbag (rosbag2, MCAP storage). Found in ROS_PREFIX, no need to source setup.bash.
+set(ROS_PREFIX "/opt/ros/jazzy" CACHE PATH "ROS 2 installation used for the rosbag recording")
+set(ROSBAG_LIBRARIES "")
+if (EXISTS "${ROS_PREFIX}")
+    list(APPEND CMAKE_PREFIX_PATH "${ROS_PREFIX}")
+    # What setup.bash would set: ament's CMake code runs Python scripts that need ament_package
+    file(GLOB ROS_PYTHON_PATH "${ROS_PREFIX}/lib/python3*/site-packages")
+    set(ENV{PYTHONPATH} "${ROS_PYTHON_PATH}:$ENV{PYTHONPATH}")
+    set(ENV{AMENT_PREFIX_PATH} "${ROS_PREFIX}")
+    find_package(rclcpp QUIET)
+    find_package(rosbag2_cpp QUIET)
+    find_package(std_msgs QUIET)
+    find_package(geometry_msgs QUIET)
+    find_package(sensor_msgs QUIET)
+    find_package(nav_msgs QUIET)
+    find_package(tf2_msgs QUIET)
+    find_package(grid_map_msgs QUIET)
+endif ()
+if (rclcpp_FOUND AND rosbag2_cpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND AND sensor_msgs_FOUND
+        AND nav_msgs_FOUND AND tf2_msgs_FOUND)
+    message(STATUS "ROS 2 found in ${ROS_PREFIX}: recording to a rosbag enabled")
+    add_compile_definitions(WITH_ROSBAG ROS_PREFIX="${ROS_PREFIX}")
+    # The ROS libraries have no RUNPATH of their own: setup.bash puts them on LD_LIBRARY_PATH. An old-style RPATH
+    # (DT_RPATH, unlike DT_RUNPATH also used for their dependencies and for the plugins rosbag2 loads) lets the
+    # programs run without sourcing setup.bash. See ROSBAG_LINK_OPTIONS in src/Test/CMakeLists.txt.
+    set(ROSBAG_LINK_OPTIONS "-Wl,--disable-new-dtags" "-Wl,-rpath,${ROS_PREFIX}/lib")
+    set(ROSBAG_LIBRARIES rclcpp::rclcpp rosbag2_cpp::rosbag2_cpp ${std_msgs_TARGETS} ${geometry_msgs_TARGETS}
+        ${sensor_msgs_TARGETS} ${nav_msgs_TARGETS} ${tf2_msgs_TARGETS})
+    if (grid_map_msgs_FOUND)
+        message(STATUS "grid_map_msgs found: the occupancy map is also recorded as a GridMap (with the class layer)")
+        add_compile_definitions(WITH_GRID_MAP)
+        list(APPEND ROSBAG_LIBRARIES ${grid_map_msgs_TARGETS})
+    else ()
+        message(STATUS "grid_map_msgs not found (sudo apt install ros-jazzy-grid-map-msgs): no GridMap in the rosbag")
+    endif ()
+else ()
+    message(STATUS "ROS 2 not found in ${ROS_PREFIX}: recording to a rosbag disabled")
+endif ()
+
 # Find Qt5 
 find_package(Qt5 REQUIRED COMPONENTS Core Gui OpenGL Widgets REQUIRED)
 # Enable automatic MOC, UIC, and RCC processing

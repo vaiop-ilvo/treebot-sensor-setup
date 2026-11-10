@@ -184,6 +184,7 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
 | Ouster SDK (`OusterSDK::ouster_sensor`) | lidar |
 | Daheng Galaxy SDK | cameras: `/usr/lib/libgxiapi.so`, headers in `thirdparty/Galaxy_camera/inc` |
 | ONNX Runtime (optional) | segmentation model: `thirdparty/onnxruntime` (see [step 6](#6-segmentation-model-optional)) |
+| ROS 2 Jazzy (optional) | rosbag recording: `ros-jazzy-rosbag2` with MCAP storage and the message packages in `/opt/ros/jazzy`; `ros-jazzy-grid-map-msgs` for the GridMap (see [Rosbag](#rosbag)) |
 
 ## Configuration
 
@@ -215,12 +216,14 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
       "person/animal": ["person", "animal"]
     }
   },
-  "occupancy_map": { "min_height": 0.2, "max_height": 3.0 }
+  "occupancy_map": { "min_height": 0.2, "max_height": 3.0, "cell_size": 0.1, "size": 40.0 },
+  "record_format": "folder"
 }
 ```
 
 * `rotation`: `cw`, `ccw`, `180`, or leave it out for no rotation.
-* `occupancy_map`: height range of the [occupancy map](#occupancy-map): only the points from `min_height` up to `max_height` metres above the fitted ground plane are shown (default 0.2–3.0 m: the ground and e.g. a hall ceiling are left out). A negative `min_height` includes the ground.
+* `occupancy_map`: height range of the [occupancy map](#occupancy-map): only the points from `min_height` up to `max_height` metres above the fitted ground plane are shown (default 0.2–3.0 m: the ground and e.g. a hall ceiling are left out). A negative `min_height` includes the ground. `size` and `cell_size`: extent (square around the lidar) and cell size of the occupancy grid in the [rosbag](#rosbag), default 40 m and 0.1 m.
+* `record_format`: initial recording format, `folder` (default), `rosbag` or `both` (see [Recording](#recording)).
 * `pointcloud_color`: initial colouring of the point cloud, `distance` (default), `rgb` or `segmentation` (falls back to `distance` when no model is available). It can be changed in the lidar tile while the application runs (see [Point cloud colours](#point-cloud-colours)).
 * `segmentation` (optional): the model for the segmentation colour mode.
   * `model`: folder with `model.onnx` and `config.json` (class names), relative to the repository root
@@ -253,7 +256,7 @@ All targets are defined in `src/Test/CMakeLists.txt`.
 | `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
 | `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
 | `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
-| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the occupancy map (height range of `occupancy_map` in `sensors.json`), `--blobs 50` to show only the blobs of at least 50 points in it, `--grid 0.1` to draw it as a class grid of 10 cm cells |
+| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the occupancy map (height range of `occupancy_map` in `sensors.json`), `--blobs 50` to show only the blobs of at least 50 points in it, `--grid 0.1` to draw it as a class grid of 10 cm cells, `--bag out_bag` to write the scan, images and occupancy map to a rosbag as the application records them |
 | `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found). `--device cpu\|gpu\|auto` picks where it runs, to compare GPU and CPU |
 | `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
 
@@ -329,8 +332,9 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
 *While recording, the header shows the elapsed time and the number of rows written.*
 
 1. Click **Folder…** and select an output folder. If the folder already exists and is not empty, a new folder `<folder>_1`, `<folder>_2`, … is created instead. The label shows the folder that is actually used.
-2. Click **● Record** to start and **■ Stop** to stop. The header shows `REC hh:mm:ss · N rows`. You can start and stop several times; rows are appended to the same CSV.
-3. The folder cannot be changed while recording.
+2. Choose what to record next to the Folder button: **Folder** (images and point clouds as files), **Rosbag** (a ROS 2 bag, see [Rosbag](#rosbag)) or **Folder + rosbag**. The initial choice is `record_format` in `sensors.json`. The CSV log is always written.
+3. Click **● Record** to start and **■ Stop** to stop. The header shows `REC hh:mm:ss · N rows`. You can start and stop several times; rows are appended to the same CSV.
+4. The folder and the format cannot be changed while recording.
 
 Output layout (file names are the zero-padded CSV row index, so the files of one trigger share the same number):
 
@@ -341,8 +345,44 @@ Output layout (file names are the zero-padded CSV row index, so the files of one
 ├── cam2/…
 ├── cam3/…
 ├── cam4/…
-└── lidar/000000.ply, 000001.ply, …
+├── lidar/000000.ply, 000001.ply, …
+└── rosbag_YYYYMMDD_hhmmss/          (rosbag formats: one bag per Record … Stop)
+    ├── metadata.yaml
+    └── rosbag_YYYYMMDD_hhmmss_0.mcap
 ```
+
+With the **Rosbag** format the `camN/` and `lidar/` folders stay empty. **Replay** reads only the files, not the bag.
+
+### Rosbag
+
+The rosbag formats write a ROS 2 bag (rosbag2, MCAP storage with zstd compression) with standard message types, so it can be played with `ros2 bag play`, viewed in RViz or Foxglove Studio, and read with `rosbag2_py`. It needs ROS 2 Jazzy in `/opt/ros/jazzy` at build time (CMake reports `ROS 2 found … recording to a rosbag enabled`); the application does not need `setup.bash` to be sourced. Messages are converted and compressed on 3 background threads; when the disk cannot keep up, messages are dropped and the status bar shows how many.
+
+| Topic | Type | Content |
+|---|---|---|
+| `/lidar/points` | `sensor_msgs/PointCloud2` | every scan: x, y, z in the `lidar` frame |
+| `/lidar/points_segmented` | `sensor_msgs/PointCloud2` | segmentation mode, the segmented scans: x, y, z, rgb (class colour), label (class id, 255 = none) |
+| `/camN/image/compressed` | `sensor_msgs/CompressedImage` | the camera frames of the rows, PNG (lossless) |
+| `/camN/camera_info` | `sensor_msgs/CameraInfo` | intrinsics and distortion from `config/calib.json`, with every image |
+| `/tf_static` | `tf2_msgs/TFMessage` | `lidar` → `camN` (camera optical frames, from the calibration) |
+| `/tf` | `tf2_msgs/TFMessage` | `ground` → `lidar`, per scan: the fitted ground plane (x forward, y left, z up, origin below the lidar) |
+| `/occupancy_map` | `nav_msgs/OccupancyGrid` | every scan, frame `ground`: -1 unknown (no points), 0 free (only points below `min_height`), 100 occupied (points between `min_height` and `max_height`) |
+| `/occupancy_map/grid_map` | `grid_map_msgs/GridMap` | same grid with the layers `occupancy` (NaN, 0, 100), `elevation` (highest point in the range, m) and, in segmentation mode, `class` (most common class of the occupied cell, NaN = none) |
+| `/occupancy_map/class_names` | `std_msgs/String` | once: JSON `{"class id": "name"}` for the `class` layer and the `label` field |
+| `/robot/odom` | `nav_msgs/Odometry` | robot state from Redis: position, roll/pitch/yaw (radians) as quaternion, odometry speeds; `odom` → `base_link` |
+| `/robot/gnss` | `sensor_msgs/NavSatFix` | latitude, longitude; status FIX when the robot reports a GPS fix |
+
+* **Occupancy map format:** `nav_msgs/OccupancyGrid` is the ROS standard (Nav2, RViz), but it has one value per cell, so the classes are in the `GridMap` (the multi-layer map of [grid_map](https://github.com/ANYbotics/grid_map); its layout: index (0, 0) at the corner with the largest x and y, column major). The `GridMap` needs `grid_map_msgs` at build time (`sudo apt install ros-jazzy-grid-map-msgs`); without it the bag has everything else. The grid is `size` × `size` metres around the lidar in cells of `cell_size` (`occupancy_map` in `sensors.json`, default 40 m and 10 cm).
+* In segmentation mode the `GridMap` and `/lidar/points_segmented` come from the segmentation worker, which skips scans when it is slower than the lidar; `/lidar/points` and `/occupancy_map` have every scan.
+* Data rate at 10 Hz with 4 cameras: ~35 MB/s (mostly the PNG images).
+* **View a bag:** `scripts/bag_viewer.py` plays it back with the camera images, the occupancy map (GridMap, class layer), the segmented points from above and the robot state (play/pause, slider, speed; space and ←/→):
+
+  ```bash
+  source /opt/ros/jazzy/setup.bash
+  scripts/bag_viewer.py <folder>/rosbag_YYYYMMDD_hhmmss --range 0.5 1.5    # --range: occupancy_map height range
+  ```
+
+  It reads the messages on demand, so large bags open in a few seconds. Started from the VS Code (snap) terminal it can fail like the application (see [Using the application](#using-the-application)); run it from a normal terminal then.
+* Check a bag: `source /opt/ros/jazzy/setup.bash && ros2 bag info <folder>/rosbag_…`. `colorize_cloud … --bag <folder>` writes a recorded scan to a bag in the same way, without the sensors.
 
 ### Replay
 
@@ -467,6 +507,7 @@ include/, src/
 └── Test/                 The example executables (see table above)
 config/                   sensors.json (addresses, colour mode, segmentation model), calib.json (intrinsics / extrinsics)
 scripts/download_models.sh  Downloads ONNX Runtime and the segmentation model(s)
+scripts/bag_viewer.py       Plays back a recorded rosbag: images, occupancy map, segmented points (Python, ROS 2)
 models/                   Segmentation models (git-ignored, see step 6 of the installation)
 img/                      Images used in this README
 ```

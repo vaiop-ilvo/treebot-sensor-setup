@@ -3,6 +3,8 @@
 #include <Utils/AsyncWriter.h>
 
 #include <QApplication>
+#include <QDateTime>
+#include <QMessageBox>
 #include <QDebug>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -47,6 +49,10 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
     // Segmentation model on a background thread; its results are shown on the GUI thread
     segmentation = std::make_unique<SegmentationWorker>(config.segmentation, colorizer,
         [this](SegmentationWorker::Result result) {
+            // Recorded on the worker thread: also the results that are not shown any more
+            if (result.record) {
+                bag->writeSegmentedScan(result.stamp, result.cloud, result.labels, result.plane, this->config.occupancyMap);
+            }
             QMetaObject::invokeMethod(this, [this, result]() { showSegmentation(result); }, Qt::QueuedConnection);
         },
         [this](SegmentationWorker::DeviceStatus status) {
@@ -102,6 +108,15 @@ void MainWindow::setupUI()
     headerStack->addWidget(recordWidget);
     headerStack->addWidget(replayWidget);
     connect(recordWidget, &RecordWidget::replayRequested, this, [this]() { startReplay(); });
+    recordWidget->setBagAvailable(BagWriter::isAvailable(), "Built without ROS 2 (/opt/ros/jazzy): no rosbag recording");
+    recordWidget->setFormat(QString::fromStdString(config.recordFormat));
+    connect(recordWidget, &RecordWidget::recordingChanged, this, [this](bool recording) {
+        if (recording) {
+            startBag();
+        } else {
+            stopBag();
+        }
+    });
     connect(replayWidget, &ReplayWidget::liveRequested, this, [this]() { stopReplay(); });
     connect(replayWidget, &ReplayWidget::frameLoaded, this, [this](const RecordedFrame& frame) { showRecordedFrame(frame); });
     robotWidget = new RobotWidget(central);
@@ -499,7 +514,7 @@ void MainWindow::startCapture()
                 lidarWidget->setPointCloud(pc);
             }
             lidarWidget->setInfo(lidarPtr->getIp(), lidarPtr->getFps(), lidarPtr->getFrameId(), pc->size(), Theme::Status::Ok);
-            if (capture.record) {
+            if (capture.record && recordWidget->savesFiles()) {
                 const QString relativeFileName = QString("lidar/%1.ply").arg(capture.fileIndex, 6, 10, QChar('0'));
                 if (lidarPtr->savePLY(recordPath(relativeFileName))) {
                     capture.lidar.pcPath = relativeFileName.toStdString();
@@ -511,11 +526,23 @@ void MainWindow::startCapture()
     }
     capture.triggerTs = capture.lidar.ts != 0 ? capture.lidar.ts : hostTimeMicros();
 
+    // Rosbag: the scan, its ground plane and the occupancy map. In segmentation mode the GridMap (with the class
+    // layer) is written when the worker has segmented the scan.
+    if (capture.record && capture.pointCloud && bag->isOpen()) {
+        recordPlane = fitGroundPlane(*capture.pointCloud, recordPlane.valid ? &recordPlane : nullptr);
+        capture.plane = recordPlane;
+        const bool segmenting = colorMode == ColorMode::Segmentation && segmentation->isAvailable();
+        bag->writeScan(capture.triggerTs, capture.pointCloud, recordPlane, config.occupancyMap, !segmenting);
+    }
+
     // Robot: latest state from the background poller
     if (robotPtr) {
         capture.robot = robotPtr->getLatest();
         if (capture.robot.valid) {
             robotWidget->setMetaData(capture.robot);
+            if (capture.record && bag->isOpen()) {
+                bag->writeRobot(capture.triggerTs, capture.robot);
+            }
         } else {
             const std::string error = robotPtr->getLastError();
             robotWidget->setOffline(error.empty() ? "Connecting…" : QString("Offline: %1").arg(QString::fromStdString(error)));
@@ -582,7 +609,10 @@ void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
 
         camPtr->getMetaData(frame, camMetaData);
         camMetaData.valid = true;
-        if (record) {
+        if (record && bag->isOpen()) {
+            bag->writeImage(i, frame.ts, frame.image);
+        }
+        if (record && recordWidget->savesFiles()) {
             const QString relativeFileName = QString("cam%1/%2.png").arg(i + 1).arg(capture.fileIndex, 6, 10, QChar('0'));
             if (Daheng::saveFrame(frame, recordPath(relativeFileName))) {
                 camMetaData.imPath = relativeFileName.toStdString();
@@ -595,7 +625,8 @@ void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
             lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
         } else if (colorMode == ColorMode::Segmentation) {
             // The worker keeps only the newest job, so it never falls behind the scans
-            segmentation->submit({segmentationTag, capture.pointCloud, std::move(imagesRGB)});
+            segmentation->submit({segmentationTag, capture.pointCloud, std::move(imagesRGB), capture.triggerTs, capture.plane,
+                                  record && bag->isOpen()});
         }
     }
 
@@ -613,7 +644,46 @@ void MainWindow::updateStatus()
     if (dropped > 0) {
         text += QString(" · <span style='color:%1'>%2 files dropped (disk too slow)</span>").arg(Theme::error.name()).arg(dropped);
     }
+    if (bag->isOpen()) {
+        text += QString(" · Rosbag queue: %1").arg(bag->pending());
+        if (const size_t bagDropped = bag->dropped(); bagDropped > 0) {
+            text += QString(" · <span style='color:%1'>%2 rosbag messages dropped</span>").arg(Theme::error.name()).arg(bagDropped);
+        }
+    }
     writerStatus->setText(text);
+}
+
+void MainWindow::startBag()
+{
+    if (!recordWidget->savesBag()) {
+        return;
+    }
+    const QString uri = recordWidget->folder() + "/rosbag_" + QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+    std::string error;
+    if (!bag->open(uri.toStdString(), error)) {
+        qWarning().noquote() << QString::fromStdString(error);
+        QMessageBox::warning(this, "Rosbag", QString::fromStdString(error) + "\n\nThe recording continues without the rosbag.");
+        return;
+    }
+    const uint64_t now = hostTimeMicros();
+    bag->writeCalibration(now, colorizer.calibs());
+    if (segmentation->isAvailable()) {
+        bag->writeClassNames(now, segmentation->classNames());
+    }
+    recordPlane = GroundPlane{};
+    statusBar()->showMessage("Recording to the rosbag " + uri, 5000);
+}
+
+void MainWindow::stopBag()
+{
+    if (!bag->isOpen()) {
+        return;
+    }
+    const QString uri = QString::fromStdString(bag->uri());
+    const size_t dropped = bag->dropped();
+    bag->close();   // Writes what is still queued
+    statusBar()->showMessage(QString("Rosbag saved: %1%2").arg(uri)
+        .arg(dropped > 0 ? QString(" (%1 messages dropped)").arg(dropped) : QString()), 10000);
 }
 
 MainWindow::~MainWindow()

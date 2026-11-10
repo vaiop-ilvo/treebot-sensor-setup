@@ -120,6 +120,9 @@ SensorConfig SensorConfig::load(const std::string& path)
     const QJsonObject occupancy = root["occupancy_map"].toObject();
     config.occupancyMap.minHeight = static_cast<float>(occupancy["min_height"].toDouble(config.occupancyMap.minHeight));
     config.occupancyMap.maxHeight = static_cast<float>(occupancy["max_height"].toDouble(config.occupancyMap.maxHeight));
+    config.occupancyMap.cellSize = static_cast<float>(occupancy["cell_size"].toDouble(config.occupancyMap.cellSize));
+    config.occupancyMap.size = static_cast<float>(occupancy["size"].toDouble(config.occupancyMap.size));
+    config.recordFormat = root["record_format"].toString(QString::fromStdString(config.recordFormat)).toStdString();
 
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();

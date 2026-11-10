@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QComboBox>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFrame>
@@ -26,6 +27,15 @@ public:
     // Number of rows written to the current log; used as index for the file names
     uint64_t rowCount() const;
 
+    // Recording format selector: the images and point clouds as files in the folder, a rosbag in the folder, or both.
+    // The CSV log is always written.
+    bool savesFiles() const;
+    bool savesBag() const;
+    // format: folder, rosbag or both
+    void setFormat(const QString& format);
+    // Enables the rosbag formats; reason is shown as tooltip when they are not available
+    void setBagAvailable(bool available, const QString& reason = {});
+
     void logData(const RobotMetaData& robotMetaData,
                  const std::vector<CameraMetaData>& cameraMetaData,
                  const OusterMetaData& lidarMetaData);
@@ -45,6 +55,7 @@ private:
     QPushButton* stopButton;
     QPushButton* folderButton;
     QPushButton* replayButton;
+    QComboBox* formatBox;
     QLabel* folderLabel;
     QLabel* recDot;
     QLabel* statusLabel;

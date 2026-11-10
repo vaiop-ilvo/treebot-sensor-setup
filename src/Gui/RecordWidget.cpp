@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QMessageBox>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
 
 namespace {
@@ -68,6 +69,41 @@ uint64_t RecordWidget::rowCount() const
     return rows;
 }
 
+bool RecordWidget::savesFiles() const
+{
+    return formatBox->currentData().toString() != "rosbag";
+}
+
+bool RecordWidget::savesBag() const
+{
+    return formatBox->currentData().toString() != "folder";
+}
+
+void RecordWidget::setFormat(const QString& format)
+{
+    const int index = formatBox->findData(format);
+    if (index >= 0) {
+        formatBox->setCurrentIndex(index);
+    }
+}
+
+void RecordWidget::setBagAvailable(bool available, const QString& reason)
+{
+    auto* model = qobject_cast<QStandardItemModel*>(formatBox->model());
+    for (const char* format : {"rosbag", "both"}) {
+        const int index = formatBox->findData(format);
+        if (model && index >= 0) {
+            model->item(index)->setEnabled(available);
+            if (!available) {
+                formatBox->setItemData(index, reason, Qt::ToolTipRole);
+            }
+        }
+    }
+    if (!available && savesBag()) {
+        setFormat("folder");
+    }
+}
+
 void RecordWidget::setupCsvHeader()
 {
     csvHeader = {"timestamp", "lidar_ip", "lidar_ts", "lidar_frame_id", "lidar_fps", "lidar_pc_path"};
@@ -105,6 +141,16 @@ void RecordWidget::setupUI() {
     stopButton->setCursor(Qt::PointingHandCursor);
     stopButton->setEnabled(false);
 
+    formatBox = new QComboBox(this);
+    formatBox->addItem("Folder", "folder");
+    formatBox->addItem("Rosbag", "rosbag");
+    formatBox->addItem("Folder + rosbag", "both");
+    formatBox->setItemData(0, "Images (PNG) and point clouds (PLY) as files in the folder, with the CSV log", Qt::ToolTipRole);
+    formatBox->setItemData(1, "A ROS 2 bag (MCAP) in the folder: point clouds, images, robot state, transforms and the\n"
+                              "occupancy map. Only the CSV log is written next to it", Qt::ToolTipRole);
+    formatBox->setItemData(2, "The files and a ROS 2 bag, from the same rows", Qt::ToolTipRole);
+    formatBox->setToolTip("What to record");
+
     replayButton = new QPushButton("Replay…", this);
     replayButton->setToolTip("Open a recording and play it back");
     replayButton->setCursor(Qt::PointingHandCursor);
@@ -132,6 +178,7 @@ void RecordWidget::setupUI() {
     auto* buttonRow = new QHBoxLayout();
     buttonRow->setSpacing(6);
     buttonRow->addWidget(folderButton);
+    buttonRow->addWidget(formatBox);
     buttonRow->addWidget(recordButton);
     buttonRow->addWidget(stopButton);
     buttonRow->addWidget(folderLabel, 1);
@@ -183,6 +230,7 @@ void RecordWidget::onRecordClicked() {
     recordButton->setEnabled(false);
     stopButton->setEnabled(true);
     folderButton->setEnabled(false);    // Never switch folders in the middle of a recording
+    formatBox->setEnabled(false);
     replayButton->setEnabled(false);
     updateStatus();
     emit recordingChanged(true);
@@ -194,6 +242,7 @@ void RecordWidget::onStopClicked() {
     recordButton->setEnabled(true);
     stopButton->setEnabled(false);
     folderButton->setEnabled(true);
+    formatBox->setEnabled(true);
     replayButton->setEnabled(true);
     updateStatus();
     qDebug() << "Recording stopped. Log file closed.";

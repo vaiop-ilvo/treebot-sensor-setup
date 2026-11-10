@@ -134,6 +134,7 @@ target_link_libraries(qt_example_full
   ${HIREDIS_LIB}
   ${REDIS_PLUS_PLUS_LIB}
   ${ONNXRUNTIME_LIBRARIES}
+  ${ROSBAG_LIBRARIES}
 )
 
 add_executable(qt_example_filedialog "qt_example_filedialog.cpp"
@@ -168,6 +169,8 @@ target_link_libraries(read_config
 )
 
 add_executable(colorize_cloud "colorize_cloud.cpp"
+  "${SRC_DIR}/Utils/BagWriter.cpp"
+  "${SRC_DIR}/Utils/OccupancyMap.cpp"
   "${SRC_DIR}/Utils/SensorConfig.cpp"
   "${SRC_DIR}/Utils/Blobs.cpp"
   "${SRC_DIR}/Utils/GroundPlane.cpp"
@@ -181,6 +184,7 @@ target_link_libraries(colorize_cloud
   ${PCL_LIBRARIES}
   Eigen3::Eigen
   ${ONNXRUNTIME_LIBRARIES}
+  ${ROSBAG_LIBRARIES}
 )
 
 add_executable(capture_snapshot "capture_snapshot.cpp"
@@ -209,3 +213,9 @@ target_link_libraries(segment_image
   ${OpenCV_LIBS}
   ${ONNXRUNTIME_LIBRARIES}
 )
+
+# Programs that write rosbags: find the ROS libraries without setup.bash (see ROSBAG_LINK_OPTIONS in the top CMakeLists.txt)
+if (ROSBAG_LINK_OPTIONS)
+  target_link_options(qt_example_full PRIVATE ${ROSBAG_LINK_OPTIONS})
+  target_link_options(colorize_cloud PRIVATE ${ROSBAG_LINK_OPTIONS})
+endif ()

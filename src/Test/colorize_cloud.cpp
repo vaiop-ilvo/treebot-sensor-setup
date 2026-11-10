@@ -1,10 +1,12 @@
 // Colours a recorded point cloud with recorded camera images, as the main application does in RGB mode,
 // or with the class colours of a segmentation model (segmentation mode) when --model is given.
-// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>]
+// Usage: colorize_cloud <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>] [--bag <folder>]
 // The output is a binary PLY with x, y, z, red, green, blue. --bev also fits the ground plane and writes the
 // coloured cloud projected on it (bird's-eye view, forward up, rings every 5 m). With --model, --bev and --blobs, the
 // bird's-eye view shows only the blobs of at least <min points> points, with their circles (as the Blobs button). With --model and
 // --grid the bird's-eye view is the class grid: cells of <cell size> metres filled with their most common class.
+// --bag writes the scan, the images and the occupancy map to a rosbag, as the application records them (to check a bag).
+#include <Utils/BagWriter.h>
 #include <Utils/Blobs.h>
 #include <Utils/GroundPlane.h>
 #include <Utils/LidarCamera.h>
@@ -26,7 +28,7 @@
 int main(int argc, char* argv[])
 {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>]\n";
+        std::cerr << "Usage: " << argv[0] << " <calib.json> <cloud.ply> <out.ply> camN=<image.png> [camM=<image.png> ...] [--model <model dir>] [--bev <out.png>] [--blobs <min points>] [--grid <cell size m>] [--bag <folder>]\n";
         return 1;
     }
     const std::string calibFile = argv[1];
@@ -50,6 +52,8 @@ int main(int argc, char* argv[])
     std::string bevFile;
     uint32_t minBlobPoints = 0;
     float gridCell = 0.0f;
+    std::string bagUri;
+    std::vector<std::string> classNames;
     for (int i = 4; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) {
@@ -58,6 +62,10 @@ int main(int argc, char* argv[])
         }
         if (arg == "--blobs" && i + 1 < argc) {
             minBlobPoints = static_cast<uint32_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--bag" && i + 1 < argc) {
+            bagUri = argv[++i];
             continue;
         }
         if (arg == "--grid" && i + 1 < argc) {
@@ -107,6 +115,7 @@ int main(int argc, char* argv[])
             labelMaps.push_back(segmenter.segment(image));
         }
         palette = segmenter.palette();
+        classNames = segmenter.classNames();
         nColored = colorizer.colorizeLabels(cloud, labelMaps, palette, &labels);
 
         std::vector<size_t> counts(segmenter.classNames().size(), 0);
@@ -182,6 +191,37 @@ int main(int argc, char* argv[])
         cv::circle(bev, view.toPixel(0, 0), 5, cv::Scalar(255, 255, 255), -1, cv::LINE_AA);
         cv::cvtColor(bev, bev, cv::COLOR_RGB2BGR);
         cv::imwrite(bevFile, bev);
+    }
+
+    if (!bagUri.empty()) {
+        BagWriter bag;
+        std::string error;
+        if (!bag.open(bagUri, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        const uint64_t stamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const GroundPlane plane = fitGroundPlane(cloud);
+        auto shared = std::make_shared<const std::vector<vaiop::QtPoint>>(cloud);
+        bag.writeCalibration(stamp, colorizer.calibs());
+        bag.writeScan(stamp, shared, plane, sensorConfig().occupancyMap, labels.empty());
+        if (!labels.empty()) {
+            bag.writeClassNames(stamp, classNames);
+            bag.writeSegmentedScan(stamp, shared, labels, plane, sensorConfig().occupancyMap);
+        }
+        for (size_t c = 0; c < imagesRGB.size(); ++c) {
+            bag.writeImage(c, stamp, imagesRGB[c]);
+        }
+        RobotMetaData robot;
+        robot.valid = true;
+        robot.yaw = 0.5;
+        robot.lat = 51.0;
+        robot.lon = 3.7;
+        robot.gpsFix = 1;
+        bag.writeRobot(stamp, robot);
+        bag.close();
+        std::cout << "Rosbag written to " << bagUri << (bag.dropped() ? " (messages dropped)" : "") << "\n";
     }
 
     pcl::PointCloud<pcl::PointXYZRGB> output;

@@ -12,6 +12,7 @@
 #include <opencv2/core.hpp>
 
 #include <Lidar/QtPoint.h>
+#include <Utils/GroundPlane.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Segmenter.h>
 
@@ -25,6 +26,10 @@ public:
         uint64_t tag = 0;   // Returned with the result, to recognise outdated results
         std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud;
         std::vector<cv::Mat> imagesRGB;     // In the order of the calibrations; empty = no image
+        // Passed on to the result, for recording the segmented scan
+        uint64_t stamp = 0;                 // Time of the scan [us since epoch]
+        GroundPlane plane;                  // Ground plane of the scan
+        bool record = false;                // Record the result (rosbag)
     };
     struct Result {
         uint64_t tag = 0;
@@ -34,6 +39,9 @@ public:
         std::vector<cv::Mat> overlays;                         // Camera images (RGB) with the classes on top; empty = no image
         double ms = 0.0;                                       // Time for segmenting and colouring
         Segmenter::Device device = Segmenter::Device::Cpu;     // Where the model ran
+        uint64_t stamp = 0;                                     // As in the job
+        GroundPlane plane;
+        bool record = false;
     };
     // Where the model runs, and why not on the GPU (empty when it does or when the CPU was asked for)
     struct DeviceStatus {

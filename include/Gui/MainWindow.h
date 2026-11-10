@@ -19,6 +19,8 @@
 #include <Lidar/Ouster.h>
 #include <Camera/Daheng.h>
 #include <Robot/ArtofRobot.h>
+#include <Utils/BagWriter.h>
+#include <Utils/GroundPlane.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/SegmentationWorker.h>
 #include <Utils/SensorConfig.h>
@@ -39,6 +41,7 @@ private:
         OusterMetaData lidar;
         RobotMetaData robot;
         std::shared_ptr<std::vector<vaiop::QtPoint>> pointCloud;  // Coloured with the camera frames when the row completes
+        GroundPlane plane;          // Ground plane of the scan, fitted when recording to a rosbag
     };
 
     SensorConfig config;
@@ -101,6 +104,13 @@ private:
     bool showingOverlay() const;
     void updateStatus();
     std::string recordPath(const QString& relative) const;
+
+    // Rosbag recording: opened when a recording with a rosbag format starts, closed when it stops
+    GroundPlane recordPlane;                      // Ground plane of the recorded scans, smoothed over time
+    void startBag();
+    void stopBag();
+    // Before segmentation: the worker writes its results to it, so the bag must outlive the worker thread
+    std::unique_ptr<BagWriter> bag = std::make_unique<BagWriter>();
 
     // Last member: its thread is stopped first when the window is destroyed
     std::unique_ptr<SegmentationWorker> segmentation;
