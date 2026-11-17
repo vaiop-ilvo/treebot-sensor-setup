@@ -29,7 +29,9 @@ namespace {
 }
 
 BirdEyeWidget::BirdEyeWidget(QWidget* parent)
-    : QWidget(parent)
+    : QWidget(parent),
+      minHeight(BirdEyeView{}.minHeight),
+      maxHeight(BirdEyeView{}.maxHeight)
 {
     setMouseTracking(false);
     setCursor(Qt::OpenHandCursor);
@@ -50,6 +52,31 @@ void BirdEyeWidget::clear()
     setPoints({}, GroundPlane{});
 }
 
+void BirdEyeWidget::setClassGrid(bool on)
+{
+    if (classGrid != on) {
+        classGrid = on;
+        imageDirty = true;
+        update();
+    }
+}
+
+void BirdEyeWidget::setOccupancyMap(std::shared_ptr<const OccupancyMap> map, std::vector<cv::Vec3b> newPalette)
+{
+    occupancy = std::move(map);
+    palette = std::move(newPalette);
+    imageDirty = true;
+    update();
+}
+
+void BirdEyeWidget::setHeightRange(float newMin, float newMax)
+{
+    minHeight = std::min(newMin, newMax);
+    maxHeight = std::max(newMin, newMax);
+    imageDirty = true;
+    update();
+}
+
 void BirdEyeWidget::resetView()
 {
     radius = DEFAULT_RADIUS;
@@ -64,6 +91,8 @@ BirdEyeView BirdEyeWidget::view() const
     v.size = cv::Size(std::max(1, width()), std::max(1, height()));
     v.metersPerPixel = radius / (0.5f * std::max(1, std::min(width(), height())));
     v.center = cv::Point2f(static_cast<float>(center.x()), static_cast<float>(center.y()));
+    v.minHeight = minHeight;
+    v.maxHeight = maxHeight;
     // Points a bit larger when zoomed in, so the surfaces stay closed
     v.pointSize = std::clamp(static_cast<int>(std::lround(0.06f / v.metersPerPixel)), 2, 6);
     return v;
@@ -74,7 +103,7 @@ void BirdEyeWidget::paintEvent(QPaintEvent*)
     const BirdEyeView v = view();
     if (imageDirty || image.size() != size()) {
         const cv::Vec3b bg(Theme::viewport.red(), Theme::viewport.green(), Theme::viewport.blue());
-        const cv::Mat rgb = renderBirdEye(points, v, bg);
+        const cv::Mat rgb = classGrid && occupancy ? renderOccupancyMap(*occupancy, v, palette, bg) : renderBirdEye(points, v, bg);
         image = QImage(rgb.data, rgb.cols, rgb.rows, static_cast<qsizetype>(rgb.step), QImage::Format_RGB888).copy();
         imageDirty = false;
     }
@@ -130,10 +159,14 @@ void BirdEyeWidget::paintEvent(QPaintEvent*)
 
     // Ground plane information
     painter.setPen(Theme::viewportText);
-    const QString text = plane.valid
-        ? QString("Ground plane: lidar %1 m above the ground · tilt %2° · forward ↑")
+    QString text = plane.valid
+        ? QString("Occupancy %1–%2 m above the ground · lidar %3 m above the ground, tilt %4° · forward ↑")
+              .arg(minHeight, 0, 'f', 2).arg(maxHeight, 0, 'f', 2)
               .arg(plane.sensorHeight(), 0, 'f', 2).arg(plane.tiltDeg(), 0, 'f', 1)
         : QString("No ground plane found");
+    if (classGrid && occupancy) {
+        text += QString(" · class grid %1 cm").arg(std::lround(occupancy->cellSize * 100.0f));
+    }
     painter.drawText(rect().adjusted(8, 6, -8, -6), Qt::AlignLeft | Qt::AlignTop, text);
 }
 

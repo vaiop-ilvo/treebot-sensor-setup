@@ -54,6 +54,15 @@ namespace {
     }
 }
 
+std::vector<RedisKey> SensorConfig::defaultRobotKeys()
+{
+    return {{"pc.gps.fix", false},
+            {"pc.gps.ground_speed", false},
+            {"plc.monitor.navigation.velocity.longitudinal", false},
+            {"plc.monitor.navigation.velocity.angular", false},
+            {"gps.ref.state", true}};
+}
+
 SensorConfig SensorConfig::defaults()
 {
     SensorConfig config;
@@ -103,6 +112,25 @@ SensorConfig SensorConfig::load(const std::string& path)
     config.segmentation.inputSize = segmentation["input_size"].toInt(config.segmentation.inputSize);
     config.segmentation.threads = segmentation["threads"].toInt(config.segmentation.threads);
     config.segmentation.minConfidence = static_cast<float>(segmentation["min_confidence"].toDouble(config.segmentation.minConfidence));
+    config.segmentation.device = segmentation["device"].toString(QString::fromStdString(config.segmentation.device)).toStdString();
+    for (const QJsonValue& name : segmentation["ignore_classes"].toArray()) {
+        config.segmentation.ignoreClasses.push_back(name.toString().toStdString());
+    }
+    config.segmentation.ignoreOtherClasses = segmentation["ignore_other_classes"].toBool(config.segmentation.ignoreOtherClasses);
+    const QJsonObject merge = segmentation["merge_classes"].toObject();
+    for (auto it = merge.begin(); it != merge.end(); ++it) {
+        std::vector<std::string> members;
+        for (const QJsonValue& name : it.value().toArray()) {
+            members.push_back(name.toString().toStdString());
+        }
+        config.segmentation.mergeClasses.emplace_back(it.key().toStdString(), std::move(members));
+    }
+
+    const QJsonObject occupancy = root["occupancy_map"].toObject();
+    config.occupancyMap.minHeight = static_cast<float>(occupancy["min_height"].toDouble(config.occupancyMap.minHeight));
+    config.occupancyMap.maxHeight = static_cast<float>(occupancy["max_height"].toDouble(config.occupancyMap.maxHeight));
+    config.occupancyMap.cellSize = static_cast<float>(occupancy["cell_size"].toDouble(config.occupancyMap.cellSize));
+    config.occupancyMap.size = static_cast<float>(occupancy["size"].toDouble(config.occupancyMap.size));
 
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();
@@ -110,6 +138,22 @@ SensorConfig SensorConfig::load(const std::string& path)
     const QJsonObject robot = root["robot"].toObject();
     config.robotHost = robot["host"].toString(QString::fromStdString(config.robotHost)).toStdString();
     config.robotPort = robot["port"].toInt(config.robotPort);
+    // "keys": ["plain.key", {"key": "json.key", "type": "json"}, ...]
+    if (robot.contains("keys")) {
+        config.robotKeys.clear();
+        for (const QJsonValue& value : robot["keys"].toArray()) {
+            RedisKey key;
+            if (value.isObject()) {
+                key.key = value.toObject()["key"].toString().toStdString();
+                key.json = value.toObject()["type"].toString() == "json";
+            } else {
+                key.key = value.toString().toStdString();
+            }
+            if (!key.key.empty()) {
+                config.robotKeys.push_back(key);
+            }
+        }
+    }
 
     if (root.contains("cameras")) {
         config.cameras.clear();

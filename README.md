@@ -10,7 +10,7 @@ A Qt5 desktop application that records synchronised data from the VAIOP treebot 
 
 The GUI shows the live camera images and the point cloud, and when recording it writes images, point clouds and a CSV log with timestamps and robot metadata.
 
-With the lidar–camera calibration (`config/calib.json`) the point cloud can be coloured by distance, by the **camera colours** or by the classes of a **segmentation model** run on the camera images. On top of that the lidar tile offers a **bird's-eye view** on the detected ground plane, a **blob view** that groups segmented points into objects and filters them on size, and an **overlay** of the segmentation on the camera images. See [Point cloud colours](#point-cloud-colours) and [Lidar views](#lidar-views).
+With the lidar–camera calibration (`config/calib.json`) the point cloud can be coloured by distance, by the **camera colours** or by the classes of a **segmentation model** run on the camera images. On top of that the lidar tile offers an **occupancy map** (the points from above, on the detected ground plane), a **blob view** that groups segmented points into objects and filters them on size, and an **overlay** of the segmentation on the camera images. See [Point cloud colours](#point-cloud-colours) and [Lidar views](#lidar-views).
 
 ![The four camera views of the rig (virtual vineyard)](img/virtual-vineyard-image.png)
 
@@ -19,27 +19,33 @@ With the lidar–camera calibration (`config/calib.json`) the point cloud can be
 ## How it works
 
 ```
-QTimer (every 5 ms, GUI thread, never blocks)
- ├─ new lidar scan?  (or every 100 ms when no lidar is connected)
- │    ├─ point cloud -> LidarWidget   (+ queue lidar/<index>.ply when recording)
- │    ├─ latest robot state            (polled from Redis in a background thread)
- │    └─ add a pending row with the trigger timestamp (the lidar timestamp)
+Acquisition thread (Utils/Acquisition)                 sensors: 4 camera threads, Ouster, Redis poller
+ ├─ new lidar scan?  (or every 100 ms when no lidar is connected) -> a pending row with the trigger timestamp,
+ │                                                                   the point cloud and the latest robot state
  └─ oldest pending row complete?  (every camera has a frame at/after the trigger, or 150 ms passed)
-      each camera: frame closest to the trigger -> CameraWidget (+ queue camN/<index>.png when recording)
-      RecordWidget::logData()  (one CSV row)
-      colour mode RGB:          colour the point cloud with these frames -> LidarWidget
-      colour mode segmentation: hand cloud + frames to SegmentationWorker (background thread)
-                                  -> segment the images, colour the cloud by class -> LidarWidget (+ camera overlays)
+      each camera: the frame closest to the trigger -> Frame
+                         │
+Processor thread (Utils/Processor)        once per frame, for the view and the recording:
+      ground plane (RANSAC, smoothed) -> occupancy map -> colour mode RGB: colour the cloud with the frames
+      ├─ recording: Recorder -> BagWriter (3 threads: PNG, serialisation, MCAP)
+      ├─ colour mode segmentation: SegmentationWorker thread (newest frame only)
+      │      segment the images (GPU), colour the cloud by class, occupancy map with classes
+      │      ├─ recording: segmented cloud + GridMap with classes
+      │      └─ window (newest result)
+      └─ window (newest frame)
+                         │
+GUI thread (Gui/MainWindow)                only draws: camera tiles, lidar view, occupancy map, robot card
 ```
 
 * The **lidar scan is the trigger**: every new scan collects, for each camera, the frame whose timestamp is closest to the lidar timestamp, plus the latest robot state into one CSV row. Without a lidar the rows are triggered at 10 Hz.
 * The cameras are free running (not hardware triggered), so a camera frame is up to half a frame period away from the lidar timestamp. Frames more than 50 ms away are not logged, and a frame is never logged in two rows.
-* Several rows can be pending at once, so waiting for the cameras never delays the next lidar scan. Rows are logged in trigger order.
+* Several rows can be pending at once, so waiting for the cameras never delays the next lidar scan. Rows are processed and recorded in trigger order; the processing takes the newest frame for the view when it falls behind, but never skips a recorded one.
+* The window only draws and always takes the newest result, so a slow redraw never delays the acquisition or the recording. The ground plane and the occupancy map are computed once per frame and shared by the view and the bag. From the lidar trigger to the processed frame takes ~70 ms (mostly waiting for the camera frames).
 * Each camera runs its own acquisition thread (`Daheng::acquisitionLoop`), which keeps its last 8 frames (with timestamps) in memory.
-* The robot state is read from Redis in a background thread (10 Hz, 300 ms timeout), so a missing robot never blocks or crashes the GUI.
+* The robot state is read from Redis in a background thread (10 Hz, 300 ms timeout), so a missing robot never blocks or crashes the application.
 * At start-up `resetTimestamp()` is called back-to-back on the lidar and all cameras. This maps each sensor clock onto host time (µs since epoch), so their timestamps can be compared.
-* The segmentation model runs on its own thread and keeps only the newest job, so a slow model lowers the update rate of the segmented view but never delays the acquisition or the recording.
-* Images and point clouds are written by a pool of 4 writer threads (`AsyncWriter`). The queue is bounded: if the disk cannot keep up, files are dropped and the status bar shows how many. On exit the queue is flushed, so no file is cut off.
+* The segmentation model runs on its own thread and keeps only the newest job, so a slow model lowers the update rate of the segmented view (and of the segmented messages in the bag) but never delays the acquisition or the recording. The camera images of a scan go through the model as one batch; on the GPU when one is usable it keeps up with every scan.
+* Recordings are ROS 2 bags (see [Rosbag](#rosbag)), written on 3 background threads. The queue is bounded: if the disk cannot keep up, messages are dropped and the status bar shows how many. `scripts/bag_to_folder.py` writes a bag in the folder format (PNG, PLY, CSV) afterwards.
 
 ## Hardware & network
 
@@ -84,7 +90,7 @@ The folder name `sensor-setup-treebot` is what the calibration project expects n
 sudo apt update
 sudo apt install build-essential cmake git pkg-config \
     qtbase5-dev qtbase5-dev-tools libqt5opengl5-dev libgl1-mesa-dev \
-    libopencv-dev libpcl-dev libeigen3-dev libboost-all-dev \
+    libopencv-dev libeigen3-dev libboost-all-dev \
     libssl-dev libcurl4-openssl-dev \
     libjsoncpp-dev libspdlog-dev libtins-dev libglfw3-dev libpng-dev
 ```
@@ -130,9 +136,20 @@ make -j && sudo make install && cd ../../..
 The segmentation colour mode needs [ONNX Runtime](https://onnxruntime.ai/) and a pretrained model. One script downloads both (ONNX Runtime 1.20.1 to `thirdparty/onnxruntime`, the model to `models/`):
 
 ```bash
-scripts/download_models.sh          # SegFormer-B0 (15 MB, fast enough on the CPU)
-scripts/download_models.sh b2       # SegFormer-B2 (sharper; for a GPU build of ONNX Runtime)
+scripts/download_models.sh          # SegFormer-B0 (15 MB, ~55 ms per camera image on the CPU)
+scripts/download_models.sh --gpu    # GPU build of ONNX Runtime + CUDA 12 / cuDNN 9 libraries (~1.8 GB)
+scripts/download_models.sh b2       # SegFormer-B2 (sharper; for the GPU)
 ```
+
+**GPU (NVIDIA, CUDA).** With `--gpu` the script replaces a CPU build of ONNX Runtime by the GPU build and puts the CUDA 12 / cuDNN 9 libraries in `thirdparty/cuda/lib` (NVIDIA's pip packages, no root needed, nothing installed system-wide; the application loads them from there). Re-run `cmake` afterwards: it reports `ONNX Runtime is the GPU build`. The model then runs on the GPU when one is usable and on the CPU otherwise (see `device` under [Configuration](#configuration)); the **GPU / CPU** selector in the lidar tile switches while the application runs.
+
+The GPU needs a loaded NVIDIA driver: `nvidia-smi` must list the GPU. After a kernel update Ubuntu sometimes has no driver module for the new kernel yet; then the application says `the NVIDIA driver is not loaded` and runs on the CPU. Install the module for the running kernel and reboot:
+
+```bash
+sudo apt install linux-modules-nvidia-595-open-$(uname -r)    # or: sudo ubuntu-drivers install
+```
+
+Note: on the CPU the GPU build of ONNX Runtime is ~20 % slower than the CPU build, so leave out `--gpu` on a PC without an NVIDIA GPU.
 
 Without ONNX Runtime the application still builds; the segmentation mode is then disabled. CMake reports `ONNX Runtime found … (point cloud segmentation enabled)` when it is used.
 
@@ -165,7 +182,6 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
 |---|---|
 | Qt5 (Core, Gui, Widgets, OpenGL) | GUI, point cloud viewer (OpenGL 3.3), JSON |
 | OpenCV | image handling, saving PNGs |
-| PCL (io) | saving point clouds as binary PLY |
 | Eigen3 | matrices (calibration, projection) |
 | Boost (json, system, filesystem, context, thread) | parsing the robot state JSON |
 | OpenSSL, libcurl | Ouster HTTP client |
@@ -173,6 +189,7 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
 | Ouster SDK (`OusterSDK::ouster_sensor`) | lidar |
 | Daheng Galaxy SDK | cameras: `/usr/lib/libgxiapi.so`, headers in `thirdparty/Galaxy_camera/inc` |
 | ONNX Runtime (optional) | segmentation model: `thirdparty/onnxruntime` (see [step 6](#6-segmentation-model-optional)) |
+| ROS 2 Jazzy (for recording) | rosbag recording (without it the application builds, but cannot record): `ros-jazzy-rosbag2` with MCAP storage and the message packages in `/opt/ros/jazzy`; `ros-jazzy-grid-map-msgs` for the GridMap (see [Rosbag](#rosbag)) |
 
 ## Configuration
 
@@ -187,25 +204,46 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
     { "name": "cam3", "ip": "192.168.2.12", "rotation": "ccw" },
     { "name": "cam4", "ip": "192.168.2.11", "rotation": "cw" }
   ],
-  "robot":   { "host": "192.168.1.20", "port": 6379 },
+  "robot":   {
+    "host": "192.168.1.20", "port": 6379,
+    "keys": ["pc.gps.fix", "pc.gps.ground_speed", "plc.monitor.navigation.velocity.longitudinal",
+             "plc.monitor.navigation.velocity.angular", { "key": "gps.ref.state", "type": "json" }]
+  },
   "calibration": "config/calib.json",
   "pointcloud_color": "rgb",
   "segmentation": {
     "model": "models/segformer-b0-ade",
     "input_size": 512,
     "threads": 0,
-    "min_confidence": 0.0
-  }
+    "min_confidence": 0.0,
+    "device": "auto",
+    "ignore_other_classes": true,
+    "merge_classes": {
+      "wall/building": ["wall", "building", "house", "skyscraper", "hovel", "tower"],
+      "plant/tree": ["tree", "plant", "palm", "flower", "pole"],
+      "vehicle": ["car", "truck", "van", "bus", "bicycle", "minibike", "boat", "ship", "airplane"],
+      "person/animal": ["person", "animal"]
+    }
+  },
+  "occupancy_map": { "min_height": 0.2, "max_height": 3.0, "cell_size": 0.1, "size": 40.0 }
 }
 ```
 
 * `rotation`: `cw`, `ccw`, `180`, or leave it out for no rotation.
+* `robot.keys`: the Redis keys read at 10 Hz and recorded with every row (`/record/row` in the bag). A string is read with `GET`, `{"key": …, "type": "json"}` with `JSON.GET` (RedisJSON). The keys above (the default) are the ones the application knows: they fill the robot card, `/robot/odom` and `/robot/gnss` and the `robot_*` CSV columns. Any other key is recorded as raw value and becomes a `redis:<key>` column in the CSV of `bag_to_folder.py`.
+* `occupancy_map`: height range of the [occupancy map](#occupancy-map): only the points from `min_height` up to `max_height` metres above the fitted ground plane are shown (default 0.2–3.0 m: the ground and e.g. a hall ceiling are left out). A negative `min_height` includes the ground. `size` and `cell_size`: extent (square around the lidar) and cell size of the occupancy grid in the [rosbag](#rosbag), default 40 m and 0.1 m.
+
 * `pointcloud_color`: initial colouring of the point cloud, `distance` (default), `rgb` or `segmentation` (falls back to `distance` when no model is available). It can be changed in the lidar tile while the application runs (see [Point cloud colours](#point-cloud-colours)).
 * `segmentation` (optional): the model for the segmentation colour mode.
   * `model`: folder with `model.onnx` and `config.json` (class names), relative to the repository root
   * `input_size`: long side of the network input in pixels (the image is scaled to it, aspect ratio kept). Smaller is faster and coarser
   * `threads`: ONNX Runtime threads, `0` = all cores
   * `min_confidence`: pixels where the model's class probability is lower stay unlabelled (grey), `0` = label everything
+  * `ignore_other_classes`: `true` = only the classes of `merge_classes` are labelled; all others (sky, floor, ceiling, road, grass, furniture, …) stay unlabelled. They still take part in the model's choice, so a sky pixel stays unlabelled instead of getting the nearest of the kept classes. The config uses this to keep only walls/buildings, plants/trees (with poles: the bamboo sticks next to young trees, which the robot has to steer around), vehicles and people/animals (ADE20K has no tractor class: a tractor is usually seen as truck or car)
+  * `ignore_classes`: classes of the model that stay unlabelled (grey points, no overlay, not in the legend, grid or blobs), e.g. the ceiling and floor of a hall. A pixel where such a class wins is not given the next best class
+  * `merge_classes`: classes combined into one, as `"name": [classes]`. Their probabilities are added before the best class is chosen, so a pixel that is 30 % tree and 30 % plant is 60 % `plant/tree`. The group gets the colour and id of its first class
+  * Class names are those of the model's `config.json` (`id2label`); unknown names are reported and left out. `treebot_tool segment` and `treebot_tool colorize` use these settings too
+  * `device`: `auto` (default: the GPU when one is usable, else the CPU), `gpu` (same, but warns when it falls back to the CPU) or `cpu`. The **GPU / CPU** selector in the lidar tile overrides it while the application runs
 * The file is searched in this order:
   1. the path given as first argument of `qt_example_full`
   2. `./config/sensors.json`
@@ -214,22 +252,15 @@ AddressSanitizer is off by default. Enable it with `cmake -DENABLE_ASAN=ON ..` (
 
 ## Executables
 
-All targets are defined in `src/Test/CMakeLists.txt`.
+Both programs are defined in `src/Test/CMakeLists.txt`; they share the library `treebot_core` (sensors, processing, recording). `treebot_tool` without arguments lists its commands.
 
 | Target | Description |
 |---|---|
 | `qt_example_full` | **Main application**: all cameras, lidar, robot state and recording. Optional arg: config file |
-| `qt_example_camera` | Qt viewer for the first camera of the config |
-| `qt_example_lidar` | Qt point cloud viewer for the lidar |
-| `qt_example_pointcloud` | OpenGL point cloud widget demo (no hardware needed) |
-| `qt_example_filedialog` | Record widget demo (no hardware needed) |
-| `camera_example` | OpenCV viewer of all cameras side by side (`q` to quit). Optional arg: calibration file |
-| `lidar_example_reflectivity` | OpenCV viewer of the lidar reflectivity image (`q` to quit) |
-| `redis_example` | Reads and prints the robot metadata from Redis. Optional arg: host (e.g. `treebot`) |
-| `read_config` | Prints the intrinsics/extrinsics of `cam1` from a calibration file: `read_config config/calib.json` |
-| `colorize_cloud` | Colours a recorded point cloud with recorded images, like the RGB mode: `colorize_cloud config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the bird's-eye view, `--blobs 50` to show only the blobs of at least 50 points in it |
-| `segment_image` | Runs the segmentation model on images and writes them with the class colours on top: `segment_image models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found) |
-| `capture_snapshot` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: `capture_snapshot snap/` writes `snap/cloud.ply` and `snap/camN.png` |
+| `treebot_tool snapshot <dir>` | Saves one lidar scan and one image per camera, as the application sees them, to check the calibration: writes `<dir>/cloud.ply` and `<dir>/camN.png` |
+| `treebot_tool segment` | Runs the segmentation model on images and writes them with the class colours on top: `treebot_tool segment models/segformer-b0-ade out/ cam1/000123.png cam2/000123.png` (prints the time and the classes found). `--device cpu\|gpu\|auto` picks where it runs, to compare GPU and CPU |
+| `treebot_tool record <folder>` | Records a rosbag without the GUI, through the same pipeline as the application: `treebot_tool record ~/recordings --seconds 60 --segment` (`--segment`: with the segmentation model). Prints rows, processing delay and dropped messages per second; Ctrl+C stops cleanly |
+| `treebot_tool colorize` | Colours a recorded point cloud with recorded images, like the RGB mode: `treebot_tool colorize config/calib.json lidar/000123.ply out.ply cam1=cam1/000123.png cam2=cam2/000123.png`. Add `--model models/segformer-b0-ade` for the segmentation mode, `--bev bev.png` to fit the ground plane and write the occupancy map (height range of `occupancy_map` in `sensors.json`), `--blobs 50` to show only the blobs of at least 50 points in it, `--grid 0.1` to draw it as a class grid of 10 cm cells, `--bag out_bag` to write the scan, images and occupancy map to a rosbag as the application records them |
 
 ## Using the application
 
@@ -238,7 +269,10 @@ Start the application from the repository root (it then finds `config/sensors.js
 ```bash
 ./build/bin/qt_example_full                     # default config
 ./build/bin/qt_example_full my_sensors.json     # another config file
+./build/bin/qt_example_full config/sensors-orchard.json   # orchard setup (see below)
 ```
+
+`config/sensors-orchard.json` is the setup tested in the orchard with young trees on 10 November 2026: starts in segmentation mode, SegFormer-B0 on the GPU, the classes wall/building, plant/tree (with poles), vehicle and person/animal, occupancy map 0.5–1.5 m above the ground. It is `sensors.json` with only `pointcloud_color` changed; git tag `orchard-b0-2026-11-10` marks the code it was tested with. SegFormer-B2 detected the young trees worse than B0 there. The model and ONNX Runtime are not in git: `scripts/download_models.sh --gpu` restores them.
 
 Close it with the window's close button or **Ctrl+C** in the terminal. Do not kill it (`kill -9`): the cameras then stay locked for a few seconds and cannot be opened by the next run.
 
@@ -255,8 +289,8 @@ Close it with the window's close button or **Ctrl+C** in the terminal. Do not ki
 
 1. Start the application and wait until all status dots are green (cameras and lidar streaming, robot connected).
 2. **Folder…** → choose an output folder, e.g. `~/recordings/2026-10-19_orchard`.
-3. **● Record** → drive the robot → **■ Stop**.
-4. **Replay…** → choose the same folder → **▶ Play** (or space). Step with ← / →, drag the slider to jump.
+3. **● Record** → drive the robot → **■ Stop**. The recording is the rosbag `~/recordings/2026-10-19_orchard/rosbag_YYYYMMDD_hhmmss`.
+4. Look at it with `scripts/bag_viewer.py`, or convert it to the folder format with `scripts/bag_to_folder.py` and **Replay…** that folder → **▶ Play** (or space). Step with ← / →, drag the slider to jump.
 5. **Live** returns to the live sensors.
 
 ### Window
@@ -278,19 +312,20 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
   | Control | Function |
   |---|---|
   | **Colour** selector | distance, camera RGB or segmentation (see [Point cloud colours](#point-cloud-colours)) |
+  | **GPU / CPU** | segmentation mode: where the segmentation model runs. Starts on the GPU when one is usable; hover it for why the GPU is not used. Switching reloads the model (a second or two) |
   | **Image overlay** | segmentation mode: the camera tiles show the classes on top of the images |
   | **Blobs** | segmentation mode: only the connected objects larger than the **Min. blob size** slider, with a circle around each (see [Blob view](#blob-view)) |
-  | **Bird's-eye view** | the point cloud from above, projected on the ground plane (see [Bird's-eye view](#birds-eye-view)) |
+  | **Occupancy map** | the point cloud from above, projected on the ground plane, only the points in the configured height range (see [Occupancy map](#occupancy-map)) |
 
-  Under the view: the class legend (segmentation mode), the blob size slider (blob view) and the mouse hints.
+  Under the view: the class legend (segmentation mode, with the time per scan and where the model ran), the blob size slider (blob view) and the mouse hints.
 * **Point cloud view (3D):**
   * left drag: rotate
   * right/middle drag: pan
   * scroll: zoom
   * double-click: reset the view
-* **Bird's-eye view:** drag to pan, scroll to zoom, double-click to reset.
+* **Occupancy map:** drag to pan, scroll to zoom, double-click to reset.
 * **Missing sensors:** a sensor that cannot be reached is shown as offline and the application keeps running.
-* **Status bar:** the trigger source, the write queue, the loaded config file, the number of calibrated cameras and the segmentation model (or `off`).
+* **Status bar:** the trigger source, the rosbag queue (while recording), the loaded config file, the number of calibrated cameras and the segmentation model (or `off`).
 
 ### Recording
 
@@ -298,21 +333,72 @@ The application uses the ILVO house style (`src/Gui/Theme.cpp`): ILVO green `#a3
 
 *While recording, the header shows the elapsed time and the number of rows written.*
 
-1. Click **Folder…** and select an output folder. If the folder already exists and is not empty, a new folder `<folder>_1`, `<folder>_2`, … is created instead. The label shows the folder that is actually used.
-2. Click **● Record** to start and **■ Stop** to stop. The header shows `REC hh:mm:ss · N rows`. You can start and stop several times; rows are appended to the same CSV.
-3. The folder cannot be changed while recording.
+1. Click **Folder…** and select an output folder (it is created when it does not exist).
+2. Click **● Record** to start and **■ Stop** to stop. The header shows `REC hh:mm:ss · N rows`. Every Record … Stop writes one rosbag in the folder:
 
-Output layout (file names are the zero-padded CSV row index, so the files of one trigger share the same number):
+   ```
+   <folder>/
+   └── rosbag_YYYYMMDD_hhmmss/
+       ├── metadata.yaml
+       └── rosbag_YYYYMMDD_hhmmss_0.mcap
+   ```
+3. The folder cannot be changed while recording. Without ROS 2 at build time the Record button is disabled.
+
+A **row** is one lidar trigger: the scan, for each camera the frame closest to it (at most 50 ms away, never the same frame twice) and the latest robot state. The rows are in the bag as `/record/row`, so the folder format of earlier versions can be written from it.
+
+**Folder format** (`scripts/bag_to_folder.py`): the CSV log, the camera images and the point clouds as files, which the [Replay](#replay) reads:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+scripts/.venv/bin/python scripts/bag_to_folder.py <folder>/rosbag_YYYYMMDD_hhmmss   # -> <folder>/rosbag_YYYYMMDD_hhmmss_folder
+```
 
 ```
-<folder>[_N]/
+rosbag_YYYYMMDD_hhmmss_folder/       (file names: the zero-padded row index, so the files of one row share the number)
 ├── sensor_log_YYYYMMDD_hhmmss.csv
-├── cam1/000000.png, 000001.png, …
-├── cam2/…
-├── cam3/…
-├── cam4/…
-└── lidar/000000.ply, 000001.ply, …
+├── cam1/000000.png, 000001.png, …   (the recorded PNGs, lossless)
+├── cam2/ … cam4/
+└── lidar/000000.ply, 000001.ply, …  (binary PLY: x, y, z)
 ```
+
+It was checked against the folder recording of the previous version (399 rows of the same drive): CSV identical line by line, all 1592 images identical pixel by pixel, all 399 point clouds identical point by point. Bags recorded before `/record/row` existed cannot be converted (the script says so).
+
+### Rosbag
+
+A recording is a ROS 2 bag (rosbag2, MCAP storage with zstd compression) with standard message types, so it can be played with `ros2 bag play`, viewed in RViz or Foxglove Studio, and read with `rosbag2_py`. It needs ROS 2 Jazzy in `/opt/ros/jazzy` at build time (CMake reports `ROS 2 found … recording to a rosbag enabled`); the application does not need `setup.bash` to be sourced. Messages are converted and compressed on 3 background threads; when the disk cannot keep up, messages are dropped and the status bar shows how many.
+
+| Topic | Type | Content |
+|---|---|---|
+| `/lidar/points` | `sensor_msgs/PointCloud2` | every scan: x, y, z in the `lidar` frame |
+| `/lidar/points_segmented` | `sensor_msgs/PointCloud2` | segmentation mode, the segmented scans: x, y, z, rgb (class colour), label (class id, 255 = none) |
+| `/camN/image/compressed` | `sensor_msgs/CompressedImage` | the camera frames of the rows, PNG (lossless) |
+| `/camN/camera_info` | `sensor_msgs/CameraInfo` | intrinsics and distortion from `config/calib.json`, with every image |
+| `/tf_static` | `tf2_msgs/TFMessage` | `lidar` → `camN` (camera optical frames, from the calibration) |
+| `/tf` | `tf2_msgs/TFMessage` | `ground` → `lidar`, per scan: the fitted ground plane (x forward, y left, z up, origin below the lidar) |
+| `/occupancy_map` | `nav_msgs/OccupancyGrid` | every scan, frame `ground`: -1 unknown (no points), 0 free (only points below `min_height`), 100 occupied (points between `min_height` and `max_height`) |
+| `/occupancy_map/grid_map` | `grid_map_msgs/GridMap` | same grid with the layers `occupancy` (NaN, 0, 100), `elevation` (highest point in the range, m) and, in segmentation mode, `class` (most common class of the occupied cell, NaN = none) |
+| `/occupancy_map/class_names` | `std_msgs/String` | once: JSON `{"class id": "name"}` for the `class` layer and the `label` field |
+| `/robot/odom` | `nav_msgs/Odometry` | robot state from Redis: position, roll/pitch/yaw (radians) as quaternion, odometry speeds; `odom` → `base_link` |
+| `/robot/gnss` | `sensor_msgs/NavSatFix` | latitude, longitude; status FIX when the robot reports a GPS fix |
+| `/record/info` | `std_msgs/String` | once: JSON with the CSV name and header for `bag_to_folder.py` and the camera names |
+| `/record/row` | `std_msgs/String` | per row: JSON with the lidar, camera and robot data of the row (incl. the raw values of the configured Redis keys) and the stamps of its messages |
+
+* **Occupancy map format:** `nav_msgs/OccupancyGrid` is the ROS standard (Nav2, RViz), but it has one value per cell, so the classes are in the `GridMap` (the multi-layer map of [grid_map](https://github.com/ANYbotics/grid_map); its layout: index (0, 0) at the corner with the largest x and y, column major). The `GridMap` needs `grid_map_msgs` at build time (`sudo apt install ros-jazzy-grid-map-msgs`); without it the bag has everything else. The grid is `size` × `size` metres around the lidar in cells of `cell_size` (`occupancy_map` in `sensors.json`, default 40 m and 10 cm).
+* In segmentation mode the `GridMap` and `/lidar/points_segmented` come from the segmentation worker, which skips scans when it is slower than the lidar; `/lidar/points` and `/occupancy_map` have every scan.
+* Data rate at 10 Hz with 4 cameras: ~35 MB/s (mostly the PNG images).
+* **View a bag:** `scripts/bag_viewer.py` plays it back with the camera images, the occupancy map (GridMap, class layer), the segmented points from above and the robot state (play/pause, slider, speed; space and ←/→):
+
+  ```bash
+  python3 -m venv scripts/.venv                                   # once: numpy, OpenCV, PyQt5, PyYAML
+  scripts/.venv/bin/pip install -r scripts/requirements.txt
+  source /opt/ros/jazzy/setup.bash                                # rosbag2_py and rclpy come from ROS 2
+  scripts/.venv/bin/python scripts/bag_viewer.py <folder>/rosbag_YYYYMMDD_hhmmss --range 0.5 1.5   # --range: occupancy_map height range
+  ```
+
+  The venv must use the system Python 3.12 (that of ROS 2 Jazzy); `scripts/.venv` is git-ignored. With the apt packages `python3-numpy python3-opencv python3-pyqt5 python3-yaml` the system Python runs it too, without a venv.
+
+  It reads the messages on demand, so large bags open in a few seconds. Started from the VS Code (snap) terminal it can fail like the application (see [Using the application](#using-the-application)); run it from a normal terminal then.
+* Check a bag: `source /opt/ros/jazzy/setup.bash && ros2 bag info <folder>/rosbag_…`. `treebot_tool colorize … --bag <folder>` writes a recorded scan to a bag in the same way, without the sensors.
 
 ### Replay
 
@@ -320,7 +406,7 @@ Output layout (file names are the zero-padded CSV row index, so the files of one
 
 *Replay: play/pause, step, playback speed and a slider to seek through the recording; **Live** returns to the sensors.*
 
-Click **Replay…** (next to the recording controls; not available while recording) and select a recording folder. The header switches to the replay controls:
+Click **Replay…** (next to the recording controls; not available while recording) and select a recording folder: one written by `scripts/bag_to_folder.py`, or a folder recorded by an earlier version. The header switches to the replay controls:
 
 * **▶ Play / ❚❚ Pause** (space): plays at the recorded pace, using the lidar timestamps. When reading the files is slower than the recording (e.g. at 4×), rows are skipped to keep the pace.
 * **◀ / ▶** (← / →): previous / next row. **Slider**: jump to any row. **Speed**: 0.25× to 4×.
@@ -331,8 +417,8 @@ The sensors keep running in the background during a replay (only their display i
 
 ### CSV columns
 
-* One row is written per trigger and flushed to disk immediately.
-* Paths are relative to the recording folder.
+* The CSV of a folder written by `scripts/bag_to_folder.py` (or recorded by an earlier version): one row per trigger.
+* Paths are relative to the folder.
 * When a sensor delivered no data for a row (offline, or a camera had no frame within 50 ms of the lidar timestamp), its cells are left empty.
 
 | Columns | Content |
@@ -376,11 +462,11 @@ Segmentation (`Segmenter`, `SegmentationWorker` in `src/Utils/`):
 
 ## Lidar views
 
-The check boxes and the **Blobs** button in the lidar tile header change how the (coloured) point cloud is shown. They can be combined: e.g. segmentation + blobs + bird's-eye view gives a 2D map of the objects around the robot.
+The check boxes and the **Blobs** button in the lidar tile header change how the (coloured) point cloud is shown. They can be combined: e.g. segmentation + blobs + occupancy map gives a 2D map of the objects around the robot.
 
 ### Image overlay
 
-**Image overlay** (segmentation mode): the camera tiles show the segmented frames with the class colours blended on top, instead of the live frames. They come from the same scan as the point cloud, so tiles and point cloud always show the same moment; they update at the segmentation rate (~4 Hz on the CPU).
+**Image overlay** (segmentation mode): the camera tiles show the segmented frames with the class colours blended on top, instead of the live frames. They come from the same scan as the point cloud, so tiles and point cloud always show the same moment; they update at the segmentation rate (~4 Hz on the CPU, faster on the GPU).
 
 ### Blob view
 
@@ -389,15 +475,16 @@ The check boxes and the **Blobs** button in the lidar tile header change how the
 * Connected points of the same class form a blob: points closer than ~0.3 m are connected (cells of 0.3 m with their 26 neighbours). Classes never mix, so a person next to a wall stays a separate blob.
 * The ground plane (points up to 15 cm above it) is left out, as it would connect everything standing on it.
 * The **Min. blob size** slider under the view (5 to 5000 points, logarithmic) filters on the number of points: blobs with fewer points are removed from the point cloud. The label next to it shows the threshold and the number of blobs left.
-* Each blob is shown with a translucent circle in its class colour around it, at its centroid, covering 90% of its points. In 3D the circles always face the viewer; in the bird's-eye view they are drawn on the ground.
+* Each blob is shown with a translucent circle in its class colour around it, at its centroid, covering 90% of its points. In 3D the circles always face the viewer; in the occupancy map they are drawn on the ground.
 
-### Bird's-eye view
+### Occupancy map
 
-The **Bird's-eye view** check box in the lidar tile shows the point cloud from above, projected on the ground (`GroundPlane` in `src/Utils/`, `BirdEyeWidget` in `src/Gui/`). It works with every colour mode; with segmentation it gives a 2D map of the classes around the robot.
+The **Occupancy map** check box in the lidar tile shows the point cloud from above, projected on the ground (`GroundPlane` in `src/Utils/`, `BirdEyeWidget` in `src/Gui/`), keeping only the points in a height range above the ground: `occupancy_map` in `sensors.json`, by default 0.2–3.0 m (see [Configuration](#configuration)). So the ground itself and anything high up (a hall ceiling, a canopy) are left out, and what remains is what occupies the space the robot drives through. It works with every colour mode; with segmentation it gives a 2D map of the classes around the robot.
 
-* **Ground plane**, fitted in every scan (~1 ms): RANSAC over planes through 3 points within 1–25 m, keeping the plane with the most points within 8 cm. Only near-horizontal planes (normal within 35° of the lidar z axis) at least 20 cm below the lidar count, so walls and the ceiling are never chosen. The plane is refined by least squares and smoothed over time. On the rig the lidar is mounted ~1.0 m above the floor and tilted ~16°.
-* **Projection:** every point gets its position on the ground plane (forward = lidar x projected on the plane, shown up) and its height above it. Where points overlap from above, the highest is drawn, so objects cover the ground below them. The ground (up to 15 cm) is drawn dimmer, and points more than 4 m above the ground (e.g. a hall ceiling) are left out.
-* The view shows rings around the lidar (spacing adapts to the zoom), the lidar as a green triangle and the fitted plane (lidar height, tilt). Scroll to zoom, drag to pan, double-click to reset.
+* **Ground plane**, fitted in every scan (~6 ms, on the processing thread): a systematic search over all tilts up to 35° (2.5° steps, then 0.5° around the best) on 6000 points within 1–25 m, evenly spread over the whole scan. For every tilt a height histogram gives the best ground height (0.2–2.5 m below the lidar); a plane scores the points within 8 cm of it, minus twice the points more than 25 cm below it. There is almost nothing below the real ground, while a slanted plane through walls or machines has their points below it, so in a hall full of machines the floor wins even when it is only a small part of the scan. The plane is refined by least squares and smoothed over time. On the rig the lidar is mounted ~1.0 m above the floor and tilted ~16°; on the test scans (hall and orchard) the fit gives 0.96–1.00 m and 14–18°.
+* **Projection:** every point gets its position on the ground plane (forward = lidar x projected on the plane, shown up) and its height above it. Where points overlap from above, the highest is drawn, so objects cover the ground below them. Points outside the configured height range are left out. When the range includes the ground (negative `min_height`), the ground (up to 15 cm) is drawn dimmer.
+* The view shows rings around the lidar (spacing adapts to the zoom), the lidar as a green triangle, the height range and the fitted plane (lidar height, tilt). Scroll to zoom, drag to pan, double-click to reset.
+* **Class grid** (segmentation mode, check box under the view, on by default): the occupancy map itself, the same grid as `/occupancy_map/grid_map` in the bag (`cell_size`, default 10 cm): occupied cells (points between `min_height` and `max_height`) in the colour of their most common class, grey when no camera saw them; free cells (only points below the range) dark grey; unknown cells (no points) empty. Off: the individual points.
 
 ## Calibration file
 
@@ -418,29 +505,38 @@ Only `intrinsics` and `extrinsics` are required. The file is generated by the ca
 ```
 include/, src/
 ├── Camera/Daheng         Daheng GigE camera: open by IP, acquisition thread, image/metadata access
-├── Lidar/Ouster          Ouster lidar: scan, point cloud (Qt + PCL + Eigen), reflectivity image
+├── Lidar/Ouster          Ouster lidar: scan, point cloud
 ├── Lidar/curl_client.h   HTTP client for the Ouster REST API (adapted from the Ouster SDK)
 ├── Robot/ArtofRobot      Robot state from Redis (with background polling); State.hpp = JSON → struct
-├── Utils/AsyncWriter     Bounded worker pool that writes images and point clouds to disk
 ├── Utils/SensorConfig    Loads config/sensors.json
 ├── Utils/LidarCamera     Calibration loading (config/calib.json)
 ├── Utils/PointCloudColor Point cloud colour modes: distance, camera RGB / class maps (projection + occlusion test)
 ├── Utils/Segmenter       Semantic segmentation of an image with an ONNX model (ONNX Runtime)
 ├── Utils/SegmentationWorker Background thread: segments the camera images and colours the point cloud by class
-├── Utils/GroundPlane     Ground plane fit (RANSAC) and projection of the cloud on it (bird's-eye view)
+├── Utils/GroundPlane     Ground plane fit (RANSAC) and projection of the cloud on it (occupancy map)
 ├── Utils/Blobs           Blob view: connected points of a class, filtered on their number of points
+├── Utils/Frame.h         The data of the pipeline: Frame (a row), ProcessedFrame (+ ground plane, occupancy map)
+├── Utils/Acquisition     Acquisition thread: connects the sensors, makes the rows (trigger + camera frames + robot)
+├── Utils/Processor       Processing thread: ground plane, occupancy map, RGB colours; feeds Recorder and segmentation
+├── Utils/Recorder        One rosbag per recording: the rows, the segmentation, /record/info and /record/row
+├── Utils/BagWriter       Rosbag recording (rosbag2, MCAP): all topics, background threads
+├── Utils/OccupancyMap    Occupancy grid on the ground plane (OccupancyGrid / GridMap in the bag)
+├── Utils/PlyFile         Binary PLY files (read and write; also reads the files of PCL)
 ├── Utils/MetaData.hpp    Metadata structs for robot, lidar and cameras
-├── Gui/                  MainWindow (main app), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
+├── Gui/                  MainWindow (builds the pipeline, draws its results), Theme (ILVO style), Camera/Lidar/Robot/Record/Replay widgets,
 │                         Recording (reads a recording folder back for the replay),
-│                         SensorHeader, PointCloudWidget (OpenGL 3.3), BirdEyeWidget, small example windows
-└── Test/                 The example executables (see table above)
+│                         SensorHeader, PointCloudWidget (OpenGL 3.3), BirdEyeWidget (occupancy map)
+└── Test/                 qt_example_full (main application) and treebot_tool (offline tools)
 config/                   sensors.json (addresses, colour mode, segmentation model), calib.json (intrinsics / extrinsics)
 scripts/download_models.sh  Downloads ONNX Runtime and the segmentation model(s)
+scripts/bag_to_folder.py    Writes a rosbag in the folder format (CSV, PNG, PLY) for the replay
+scripts/bag_viewer.py       Plays back a recorded rosbag: images, occupancy map, segmented points (Python, ROS 2)
+scripts/requirements.txt    Python packages of the scripts (venv in scripts/.venv, git-ignored)
 models/                   Segmentation models (git-ignored, see step 6 of the installation)
 img/                      Images used in this README
 ```
 
 ## Notes
 
-* **Signals and slots:** AUTOMOC only generates code for `Q_OBJECT` headers that are part of a target. `RecordWidget` and `ReplayWidget` are the `Q_OBJECT` classes. `RecordWidget.h` is listed in `mocHeaders` in `src/Test/CMakeLists.txt` (shared with `qt_example_filedialog`), `ReplayWidget.h` directly in the `qt_example_full` target. If you add a new `Q_OBJECT` class, add its header to the targets that use it (the old symlink trick is no longer needed).
+* **Signals and slots:** AUTOMOC only generates code for `Q_OBJECT` headers that are part of a target. `RecordWidget` and `ReplayWidget` are the `Q_OBJECT` classes. Both headers are listed in the `qt_example_full` target in `src/Test/CMakeLists.txt`. If you add a new `Q_OBJECT` class, add its header to the targets that use it (the old symlink trick is no longer needed).
 * **OpenGL:** the point cloud view needs OpenGL 3.3 (the blob circles use instanced drawing). Without it (e.g. over X forwarding) the view stays empty and a warning is printed, but the application keeps working.

@@ -1,10 +1,10 @@
 // Saves one lidar scan and one image of every camera, as the main application sees them
 // (images rotated as configured in sensors.json). Used to check the lidar-camera calibration offline.
-// Usage: capture_snapshot <output directory>
+// Usage: treebot_tool snapshot <output directory>
 // Writes <dir>/cloud.ply and <dir>/<camN>.png
 #include <Camera/Daheng.h>
 #include <Lidar/Ouster.h>
-#include <Utils/AsyncWriter.h>
+#include <Utils/PlyFile.h>
 #include <Utils/SensorConfig.h>
 
 #include <chrono>
@@ -14,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-int main(int argc, char* argv[])
+int snapshotCommand(int argc, char* argv[])
 {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <output directory>\n";
@@ -42,7 +42,8 @@ int main(int argc, char* argv[])
 
     // A complete scan, then the images right after it
     for (int attempt = 0; attempt < 50 && !ouster->scan(0.2); ++attempt) {}
-    if (!ouster->getPointCloud() || !ouster->savePLY((outDir / "cloud.ply").string())) {
+    const auto cloud = ouster->getPointCloud();
+    if (!cloud || !writePly((outDir / "cloud.ply").string(), *cloud)) {
         std::cerr << "No lidar scan received\n";
         return 1;
     }
@@ -60,7 +61,6 @@ int main(int argc, char* argv[])
     for (auto& camera : cameras) {
         camera->stop();
     }
-    AsyncWriter::instance().flush();
     std::cout << "Saved to " << outDir << "\n";
     return 0;
 }

@@ -1,5 +1,6 @@
 #include <Gui/Recording.h>
-#include <Lidar/Ouster.h>
+#include <Utils/PlyFile.h>
+#include <Utils/PointCloudColor.h>
 
 #include <QDateTime>
 #include <QDir>
@@ -198,7 +199,10 @@ RecordedFrame Recording::load(size_t row) const
     const QDir dir(recordFolder);
 
     if (!frame.lidar.pcPath.empty()) {
-        frame.pointCloud = Ouster::loadPLY(dir.filePath(QString::fromStdString(frame.lidar.pcPath)).toStdString());
+        frame.pointCloud = readPly(dir.filePath(QString::fromStdString(frame.lidar.pcPath)).toStdString());
+        if (frame.pointCloud) {
+            colorByDistance(*frame.pointCloud);
+        }
     }
 
     frame.images.resize(frame.cameras.size());

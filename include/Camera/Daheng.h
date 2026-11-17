@@ -63,7 +63,6 @@ public:
     Daheng& operator=(const Daheng&) = delete;
 
     std::shared_ptr<cv::Mat> getCvImage();
-    std::shared_ptr<QImage> getQtImage();
 
     const std::string& getName() const;
     const std::string& getIp() const;
@@ -87,8 +86,4 @@ public:
     void stop();
     void resetTimestamp();
 
-    // Queues the latest image to be written to disk. Returns false when there is no image or the write queue is full.
-    bool saveIm(const std::string& fileName);
-    // Queues the given frame to be written to disk. Returns false when the write queue is full.
-    static bool saveFrame(const Frame& frame, const std::string& fileName);
 };

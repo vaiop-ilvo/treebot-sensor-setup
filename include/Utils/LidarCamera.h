@@ -24,5 +24,3 @@ struct CameraCalib {
 // Loads the calibration of camName. Returns an invalid CameraCalib when it cannot be read.
 CameraCalib loadCameraCalib(const std::string& calibFileName, const std::string& camName);
 
-// Loads the intrinsics and extrinsics of camName. Returns false (and identity matrices) when they cannot be read.
-bool loadCalib(const std::string& calibFileName, const std::string& camName, Eigen::Matrix3d& K, Eigen::Matrix4d& tLidarCam);

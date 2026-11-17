@@ -32,8 +32,9 @@ namespace {
     int toInt(const std::string& s) { return std::stoi(s); }
 }
 
-ArtofRobot::ArtofRobot(const std::string& hostname, int port):
-    redis(makeOptions(hostname, port))
+ArtofRobot::ArtofRobot(const std::string& hostname, int port, std::vector<RedisKey> keys):
+    redis(makeOptions(hostname, port)),
+    keys(std::move(keys))
 {}
 
 ArtofRobot::~ArtofRobot()
@@ -46,24 +47,36 @@ bool ArtofRobot::getMetaData(RobotMetaData& metaData, std::string* error)
     metaData = RobotMetaData{};
 
     try {
-        // Reuse a pooled connection instead of opening a new one for every call
+        // All configured keys in one round trip; reuses a pooled connection
         Pipeline pipe = redis.pipeline(false);
-        pipe.get("pc.gps.fix");
-        pipe.get("pc.gps.ground_speed");
-        pipe.get("plc.monitor.navigation.velocity.longitudinal");
-        pipe.get("plc.monitor.navigation.velocity.angular");
-        pipe.command("JSON.GET", "gps.ref.state");
-
+        for (const RedisKey& key : keys) {
+            if (key.json) {
+                pipe.command("JSON.GET", key.key);
+            } else {
+                pipe.get(key.key);
+            }
+        }
         auto replies = pipe.exec();
+        for (size_t i = 0; i < keys.size(); ++i) {
+            // nil when the key does not exist
+            metaData.redis.emplace_back(keys[i].key, replies.get<std::optional<std::string>>(i));
+        }
+        auto value = [&metaData](const char* key) -> std::optional<std::string> {
+            for (const auto& [name, raw] : metaData.redis) {
+                if (name == key) {
+                    return raw;
+                }
+            }
+            return std::nullopt;
+        };
 
-        // Retrieve in the same order
-        metaData.gpsFix = parseOr(replies.get<std::optional<std::string>>(0), 0, toInt);
-        metaData.gpsLngSpeed = parseOr(replies.get<std::optional<std::string>>(1), 0.0, toDouble);
-        metaData.odomLngSpeed = parseOr(replies.get<std::optional<std::string>>(2), 0.0, toDouble);
-        metaData.odomAngSpeed = parseOr(replies.get<std::optional<std::string>>(3), 0.0, toDouble);
+        // The keys the application knows (when configured)
+        metaData.gpsFix = parseOr(value("pc.gps.fix"), 0, toInt);
+        metaData.gpsLngSpeed = parseOr(value("pc.gps.ground_speed"), 0.0, toDouble);
+        metaData.odomLngSpeed = parseOr(value("plc.monitor.navigation.velocity.longitudinal"), 0.0, toDouble);
+        metaData.odomAngSpeed = parseOr(value("plc.monitor.navigation.velocity.angular"), 0.0, toDouble);
 
-        // JSON.GET returns nil when the key does not exist
-        auto stateJson = replies.get<std::optional<std::string>>(4);
+        auto stateJson = value("gps.ref.state");
         if (stateJson && !stateJson->empty())
         {
             State state = boost::json::value_to<State>(boost::json::parse(*stateJson));

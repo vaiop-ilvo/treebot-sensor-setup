@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <iostream>
+#include <limits>
 #include <map>
 
 #include <QFile>
@@ -12,6 +15,7 @@
 #include <opencv2/imgproc.hpp>
 
 #ifdef WITH_SEGMENTATION
+#include <dlfcn.h>
 #include <onnxruntime_cxx_api.h>
 #endif
 
@@ -24,7 +28,8 @@ namespace {
 
     // Recognisable colours for the classes that matter outdoors; the other classes get a generated colour
     const std::map<std::string, cv::Vec3b> NAMED_COLORS = {
-        {"sky", {110, 170, 235}},     {"tree", {30, 130, 40}},      {"plant", {100, 200, 60}},
+        {"sky", {110, 170, 235}},     {"tree", {30, 130, 40}},      {"plant/tree", {30, 150, 40}},
+        {"wall/building", {205, 185, 150}}, {"vehicle", {40, 80, 220}}, {"person/animal", {230, 40, 40}},      {"plant", {100, 200, 60}},
         {"grass", {160, 225, 100}},   {"field", {200, 205, 110}},   {"earth", {150, 105, 65}},
         {"sand", {220, 200, 140}},    {"floor", {175, 145, 115}},   {"road", {120, 120, 120}},
         {"sidewalk", {185, 185, 185}}, {"person", {230, 40, 40}},   {"car", {40, 80, 220}},
@@ -64,11 +69,77 @@ namespace {
         }
         return names;
     }
+
+#ifdef WITH_SEGMENTATION
+    // Why there is no usable CUDA GPU (driver not installed or not loaded, no GPU); empty when there is one.
+    // Asks the driver library directly, which is quicker and clearer than a failing ONNX Runtime session.
+    std::string cudaDeviceError()
+    {
+        void* driver = dlopen("libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
+        if (!driver) {
+            return "NVIDIA driver not installed (libcuda.so.1 not found)";
+        }
+        using InitFunction = int (*)(unsigned int);
+        using CountFunction = int (*)(int*);
+        const auto init = reinterpret_cast<InitFunction>(dlsym(driver, "cuInit"));
+        const auto count = reinterpret_cast<CountFunction>(dlsym(driver, "cuDeviceGetCount"));
+        if (!init || !count) {
+            return "Unexpected NVIDIA driver library (no cuInit)";
+        }
+        if (const int result = init(0); result != 0) {
+            return "No CUDA GPU: the NVIDIA driver is not loaded (cuInit error " + std::to_string(result) + "), check nvidia-smi";
+        }
+        int devices = 0;
+        if (count(&devices) != 0 || devices == 0) {
+            return "No CUDA GPU found";
+        }
+        return {};
+    }
+
+    // The GPU build of ONNX Runtime needs the CUDA 12 / cuDNN 9 libraries. scripts/download_models.sh --gpu puts them in
+    // SEGMENTATION_CUDA_DIR, which is not on the library search path: loading them here (RTLD_GLOBAL) lets the CUDA
+    // provider find them by name. Without that folder the system libraries are used (e.g. /usr/local/cuda via ldconfig).
+    void loadCudaLibraries()
+    {
+        static const bool loaded = []() {
+#ifdef SEGMENTATION_CUDA_DIR
+            const std::filesystem::path dir = SEGMENTATION_CUDA_DIR;
+            // Dependencies first: cuBLAS needs cuBLASLt, the cuDNN parts need libcudnn_graph and libcudnn_ops, ...
+            const char* libraries[] = {
+                "libcudart.so.12", "libnvrtc.so.12", "libcublasLt.so.12", "libcublas.so.12", "libcufft.so.11",
+                "libcurand.so.10", "libcudnn_graph.so.9", "libcudnn_engines_precompiled.so.9",
+                "libcudnn_engines_runtime_compiled.so.9", "libcudnn_heuristic.so.9", "libcudnn_ops.so.9",
+                "libcudnn_cnn.so.9", "libcudnn_adv.so.9", "libcudnn.so.9",
+            };
+            for (const char* library : libraries) {
+                const std::filesystem::path file = dir / library;
+                if (std::filesystem::exists(file)) {
+                    dlopen(file.c_str(), RTLD_NOW | RTLD_GLOBAL);
+                }
+            }
+#endif
+            return true;
+        }();
+        (void)loaded;
+    }
+
+    bool hasCudaProvider()
+    {
+        const std::vector<std::string> providers = Ort::GetAvailableProviders();
+        return std::find(providers.begin(), providers.end(), "CUDAExecutionProvider") != providers.end();
+    }
+#endif
 }
 
 struct Segmenter::Impl {
     SegmentationConfig config;
     std::string error;
+    // Class of the model -> output label: itself, UNKNOWN (ignored) or the first member of its merge group
+    std::vector<uint8_t> outputLabel;
+    std::vector<std::vector<int>> groups;   // Members of each merge group
+    std::vector<uint8_t> inGroup;           // Per class: 1 when it belongs to a merge group
+    Device device = Device::Cpu;
+    std::string gpuError;
     std::vector<std::string> names;
     std::vector<cv::Vec3b> palette;
 #ifdef WITH_SEGMENTATION
@@ -91,28 +162,105 @@ Segmenter::Segmenter(const SegmentationConfig& config)
     if (impl->names.empty()) {
         return;
     }
+
+    // Ignored and merged classes
+    auto classId = [this](const std::string& name) {
+        const auto it = std::find(impl->names.begin(), impl->names.end(), name);
+        if (it == impl->names.end()) {
+            std::cerr << "Segmentation: no class \"" << name << "\" in the model, left out\n";
+            return -1;
+        }
+        return static_cast<int>(it - impl->names.begin());
+    };
+    const int nClasses = static_cast<int>(impl->names.size());
+    impl->outputLabel.resize(nClasses);
+    impl->inGroup.assign(nClasses, 0);
+    for (int k = 0; k < nClasses; ++k) {
+        impl->outputLabel[k] = static_cast<uint8_t>(std::min(k, static_cast<int>(UNKNOWN)));
+    }
+    for (const std::string& name : config.ignoreClasses) {
+        if (const int k = classId(name); k >= 0) {
+            impl->outputLabel[k] = UNKNOWN;
+        }
+    }
+    for (const auto& [groupName, memberNames] : config.mergeClasses) {
+        std::vector<int> members;
+        for (const std::string& name : memberNames) {
+            if (const int k = classId(name); k >= 0 && !impl->inGroup[k]) {
+                members.push_back(k);
+                impl->inGroup[k] = 1;
+            }
+        }
+        if (members.empty()) {
+            continue;
+        }
+        // The group is shown as its first member, renamed
+        for (const int k : members) {
+            impl->outputLabel[k] = impl->outputLabel[members.front()];
+        }
+        impl->names[members.front()] = groupName;
+        impl->groups.push_back(std::move(members));
+    }
+    if (config.ignoreOtherClasses) {
+        // They still compete in the model: a pixel where such a class wins stays unlabelled
+        for (int k = 0; k < nClasses; ++k) {
+            if (!impl->inGroup[k]) {
+                impl->outputLabel[k] = UNKNOWN;
+            }
+        }
+    }
     for (size_t i = 0; i < impl->names.size(); ++i) {
         const auto named = NAMED_COLORS.find(impl->names[i]);
         impl->palette.push_back(named != NAMED_COLORS.end() ? named->second : generatedColor(i));
     }
 
 #ifdef WITH_SEGMENTATION
-    try {
-        // One environment for the whole program
-        static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "segmentation");
+    // One environment for the whole program. Never destroyed: destroying it at program exit (static destructors) can
+    // run after the CUDA runtime has shut down, which corrupts the heap when the model ran on the GPU
+    static Ort::Env& env = *new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "segmentation");
+    const std::string modelFile = config.modelDir + "/model.onnx";
+    auto makeOptions = [&config]() {
         Ort::SessionOptions options;
         options.SetIntraOpNumThreads(config.threads);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        const std::string modelFile = config.modelDir + "/model.onnx";
-        impl->session = std::make_unique<Ort::Session>(env, modelFile.c_str(), options);
+        return options;
+    };
 
-        Ort::AllocatorWithDefaultOptions allocator;
-        impl->inputName = impl->session->GetInputNameAllocated(0, allocator).get();
-        impl->outputName = impl->session->GetOutputNameAllocated(0, allocator).get();
-    } catch (const Ort::Exception& e) {
-        impl->error = std::string("Cannot load the segmentation model: ") + e.what();
-        impl->session.reset();
+    // 1. GPU, unless the CPU is asked for
+    if (config.device != "cpu") {
+        if (!hasCudaProvider()) {
+            impl->gpuError = "ONNX Runtime is the CPU build (get the GPU build with scripts/download_models.sh --gpu)";
+        } else if (impl->gpuError = cudaDeviceError(); impl->gpuError.empty()) {
+            try {
+                loadCudaLibraries();
+                Ort::SessionOptions options = makeOptions();
+                OrtCUDAProviderOptions cuda;
+                cuda.device_id = 0;
+                options.AppendExecutionProvider_CUDA(cuda);
+                impl->session = std::make_unique<Ort::Session>(env, modelFile.c_str(), options);
+                impl->device = Device::Gpu;
+            } catch (const Ort::Exception& e) {
+                impl->gpuError = std::string("Cannot run the model on the GPU: ") + e.what();
+                impl->session.reset();
+            }
+        }
     }
+
+    // 2. CPU
+    if (!impl->session) {
+        try {
+            impl->session = std::make_unique<Ort::Session>(env, modelFile.c_str(), makeOptions());
+            impl->device = Device::Cpu;
+        } catch (const Ort::Exception& e) {
+            impl->error = std::string("Cannot load the segmentation model: ") + e.what();
+            impl->session.reset();
+            return;
+        }
+    }
+
+    Ort::AllocatorWithDefaultOptions allocator;
+    impl->inputName = impl->session->GetInputNameAllocated(0, allocator).get();
+    impl->outputName = impl->session->GetOutputNameAllocated(0, allocator).get();
 #else
     impl->error = "Built without ONNX Runtime (thirdparty/onnxruntime): segmentation is not available";
 #endif
@@ -134,6 +282,16 @@ const std::string& Segmenter::error() const
     return impl->error;
 }
 
+Segmenter::Device Segmenter::device() const
+{
+    return impl->device;
+}
+
+const std::string& Segmenter::gpuError() const
+{
+    return impl->gpuError;
+}
+
 const std::vector<std::string>& Segmenter::classNames() const
 {
     return impl->names;
@@ -146,91 +304,130 @@ const std::vector<cv::Vec3b>& Segmenter::palette() const
 
 cv::Mat Segmenter::segment(const cv::Mat& imageRGB)
 {
+    return segment(std::vector<cv::Mat>{imageRGB}).front();
+}
+
+std::vector<cv::Mat> Segmenter::segment(const std::vector<cv::Mat>& imagesRGB)
+{
+    std::vector<cv::Mat> results(imagesRGB.size());
 #ifdef WITH_SEGMENTATION
-    if (!impl->session || imageRGB.empty() || imageRGB.type() != CV_8UC3) {
-        return {};
+    if (!impl->session) {
+        return results;
     }
 
-    // 1. Network input: long side inputSize, aspect ratio kept, both sides a multiple of 32
-    const double scale = static_cast<double>(impl->config.inputSize) / std::max(imageRGB.cols, imageRGB.rows);
-    auto roundedSide = [scale](int side) {
-        return std::max(INPUT_MULTIPLE, static_cast<int>(std::lround(side * scale / INPUT_MULTIPLE)) * INPUT_MULTIPLE);
-    };
-    const int width = roundedSide(imageRGB.cols);
-    const int height = roundedSide(imageRGB.rows);
-    cv::Mat resized;
-    cv::resize(imageRGB, resized, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
-
-    // 2. HWC uint8 -> CHW float, normalised
-    std::vector<float> input(static_cast<size_t>(3) * height * width);
-    for (int c = 0; c < 3; ++c) {
-        float* plane = input.data() + static_cast<size_t>(c) * height * width;
-        for (int y = 0; y < height; ++y) {
-            const cv::Vec3b* row = resized.ptr<cv::Vec3b>(y);
-            for (int x = 0; x < width; ++x) {
-                plane[y * width + x] = (row[x][c] / 255.0f - MEAN[c]) / STD[c];
-            }
+    // Images of the same size form one batch
+    std::map<std::pair<int, int>, std::vector<size_t>> batches;
+    for (size_t i = 0; i < imagesRGB.size(); ++i) {
+        if (!imagesRGB[i].empty() && imagesRGB[i].type() == CV_8UC3) {
+            batches[{imagesRGB[i].cols, imagesRGB[i].rows}].push_back(i);
         }
     }
 
-    // 3. Inference
-    const std::array<int64_t, 4> shape = {1, 3, height, width};
-    const Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value tensor = Ort::Value::CreateTensor<float>(memory, input.data(), input.size(), shape.data(), shape.size());
-    const char* inputNames[] = {impl->inputName.c_str()};
-    const char* outputNames[] = {impl->outputName.c_str()};
-    std::vector<Ort::Value> outputs;
-    try {
-        outputs = impl->session->Run(Ort::RunOptions{nullptr}, inputNames, &tensor, 1, outputNames, 1);
-    } catch (const Ort::Exception& e) {
-        impl->error = std::string("Segmentation failed: ") + e.what();
-        return {};
-    }
+    for (const auto& [imageSize, indices] : batches) {
+        // 1. Network input: long side inputSize, aspect ratio kept, both sides a multiple of 32
+        const double scale = static_cast<double>(impl->config.inputSize) / std::max(imageSize.first, imageSize.second);
+        auto roundedSide = [scale](int side) {
+            return std::max(INPUT_MULTIPLE, static_cast<int>(std::lround(side * scale / INPUT_MULTIPLE)) * INPUT_MULTIPLE);
+        };
+        const int width = roundedSide(imageSize.first);
+        const int height = roundedSide(imageSize.second);
+        const size_t n = indices.size();
+        const size_t inputPlane = static_cast<size_t>(height) * width;
 
-    // 4. Logits [1, classes, h, w] -> class with the highest score per pixel
-    const std::vector<int64_t> outShape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-    if (outShape.size() != 4) {
-        return {};
-    }
-    const int nClasses = static_cast<int>(outShape[1]);
-    const int h = static_cast<int>(outShape[2]);
-    const int w = static_cast<int>(outShape[3]);
-    const float* logits = outputs[0].GetTensorData<float>();
-    const size_t planeSize = static_cast<size_t>(h) * w;
-    const float minConfidence = impl->config.minConfidence;
-
-    cv::Mat labels(h, w, CV_8U);
-    for (size_t p = 0; p < planeSize; ++p) {
-        int best = 0;
-        float bestScore = logits[p];
-        for (int k = 1; k < nClasses; ++k) {
-            const float score = logits[k * planeSize + p];
-            if (score > bestScore) {
-                bestScore = score;
-                best = k;
+        // 2. HWC uint8 -> NCHW float, normalised
+        std::vector<float> input(n * 3 * inputPlane);
+        for (size_t b = 0; b < n; ++b) {
+            cv::Mat resized;
+            cv::resize(imagesRGB[indices[b]], resized, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
+            for (int c = 0; c < 3; ++c) {
+                float* plane = input.data() + (b * 3 + c) * inputPlane;
+                for (int y = 0; y < height; ++y) {
+                    const cv::Vec3b* row = resized.ptr<cv::Vec3b>(y);
+                    for (int x = 0; x < width; ++x) {
+                        plane[y * width + x] = (row[x][c] / 255.0f - MEAN[c]) / STD[c];
+                    }
+                }
             }
         }
-        if (minConfidence > 0.0f) {
-            // Softmax probability of the best class
-            float sum = 0.0f;
-            for (int k = 0; k < nClasses; ++k) {
-                sum += std::exp(logits[k * planeSize + p] - bestScore);
-            }
-            if (1.0f / sum < minConfidence) {
-                best = UNKNOWN;
-            }
-        }
-        labels.data[p] = static_cast<uint8_t>(std::min(best, static_cast<int>(UNKNOWN)));
-    }
 
-    // 5. Back to the image size (the output covers the whole image at a quarter of the input resolution)
-    cv::Mat full;
-    cv::resize(labels, full, imageRGB.size(), 0, 0, cv::INTER_NEAREST);
-    return full;
+        // 3. Inference
+        const std::array<int64_t, 4> shape = {static_cast<int64_t>(n), 3, height, width};
+        const Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value tensor = Ort::Value::CreateTensor<float>(memory, input.data(), input.size(), shape.data(), shape.size());
+        const char* inputNames[] = {impl->inputName.c_str()};
+        const char* outputNames[] = {impl->outputName.c_str()};
+        std::vector<Ort::Value> outputs;
+        try {
+            outputs = impl->session->Run(Ort::RunOptions{nullptr}, inputNames, &tensor, 1, outputNames, 1);
+        } catch (const Ort::Exception& e) {
+            impl->error = std::string("Segmentation failed: ") + e.what();
+            continue;
+        }
+
+        // 4. Logits [n, classes, h, w] -> class with the highest score per pixel
+        const std::vector<int64_t> outShape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        if (outShape.size() != 4 || outShape[0] != static_cast<int64_t>(n)) {
+            continue;
+        }
+        const int nClasses = static_cast<int>(outShape[1]);
+        const int h = static_cast<int>(outShape[2]);
+        const int w = static_cast<int>(outShape[3]);
+        const size_t planeSize = static_cast<size_t>(h) * w;
+        const float minConfidence = impl->config.minConfidence;
+
+        for (size_t b = 0; b < n; ++b) {
+            const float* logits = outputs[0].GetTensorData<float>() + b * nClasses * planeSize;
+            cv::Mat labels(h, w, CV_8U);
+            for (size_t p = 0; p < planeSize; ++p) {
+                // Best class, merge groups as one class: their score is log(sum(exp(logits))), so the comparison
+                // is on the summed softmax probabilities (the softmax denominator is the same for all classes)
+                int best = -1;
+                float bestScore = -std::numeric_limits<float>::infinity();
+                for (int k = 0; k < nClasses; ++k) {
+                    const float score = logits[k * planeSize + p];
+                    if (score > bestScore && !(k < static_cast<int>(impl->inGroup.size()) && impl->inGroup[k])) {
+                        bestScore = score;
+                        best = k;
+                    }
+                }
+                for (const std::vector<int>& group : impl->groups) {
+                    float maxLogit = -std::numeric_limits<float>::infinity();
+                    for (const int k : group) {
+                        maxLogit = std::max(maxLogit, logits[k * planeSize + p]);
+                    }
+                    float sum = 0.0f;
+                    for (const int k : group) {
+                        sum += std::exp(logits[k * planeSize + p] - maxLogit);
+                    }
+                    const float score = maxLogit + std::log(sum);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = group.front();
+                    }
+                }
+                if (minConfidence > 0.0f) {
+                    // Softmax probability of the best class
+                    float sum = 0.0f;
+                    for (int k = 0; k < nClasses; ++k) {
+                        sum += std::exp(logits[k * planeSize + p] - bestScore);
+                    }
+                    if (1.0f / sum < minConfidence) {
+                        best = UNKNOWN;
+                    }
+                }
+                labels.data[p] = best == UNKNOWN || best < 0 ? UNKNOWN
+                               : best < static_cast<int>(impl->outputLabel.size()) ? impl->outputLabel[best]
+                                                                                   : UNKNOWN;
+            }
+
+            // 5. Back to the image size (the output covers the whole image at a quarter of the input resolution)
+            cv::resize(labels, results[indices[b]], cv::Size(imageSize.first, imageSize.second), 0, 0, cv::INTER_NEAREST);
+        }
+    }
 #else
-    (void)imageRGB;
-    return {};
+    (void)imagesRGB;
 #endif
+    return results;
 }
 
 cv::Mat Segmenter::overlay(const cv::Mat& imageRGB, const cv::Mat& labels, const std::vector<cv::Vec3b>& palette, float alpha)

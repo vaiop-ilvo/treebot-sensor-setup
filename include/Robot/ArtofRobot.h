@@ -8,12 +8,14 @@
 #include <sw/redis++/redis++.h>
 
 #include <Utils/MetaData.hpp>
+#include <Utils/SensorConfig.h>
 #include <Robot/State.hpp>
 
 class ArtofRobot
 {
 private:
     sw::redis::Redis redis;
+    std::vector<RedisKey> keys;
 
     // Background polling
     std::thread pollThread;
@@ -23,7 +25,8 @@ private:
     std::string lastError;
 
 public:
-    ArtofRobot(const std::string& hostname, int port=6379);
+    // keys: the Redis keys to read (and record); the known ones also fill the fields of RobotMetaData
+    ArtofRobot(const std::string& hostname, int port, std::vector<RedisKey> keys = SensorConfig::defaultRobotKeys());
     ~ArtofRobot();
 
     ArtofRobot(const ArtofRobot&) = delete;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -24,10 +25,11 @@ struct GroundPlane {
     float tiltDeg() const;
 };
 
-// Fits the ground plane with RANSAC: the plane with the most points among the near-horizontal planes
-// (normal within MAX_TILT of the lidar z axis) below the sensor, refined by least squares on its inliers.
-// Walls (not horizontal) and the ceiling (above the sensor) are never chosen. With a previous plane the
-// result is smoothed over time, unless the ground changed a lot. Returns an invalid plane when no ground is found.
+// Fits the ground plane: a systematic search over all tilts up to MAX_TILT (coarse, then fine around the best) for the
+// plane below the sensor with the most points on it, minus a penalty for points below it (there is almost nothing
+// below the real ground; a slanted plane through walls or machines has their points below it). Refined by least
+// squares on its inliers. Walls (not horizontal) and the ceiling (above the sensor) are never chosen. With a previous
+// plane the result is smoothed over time, unless the ground changed a lot. Returns an invalid plane without ground.
 GroundPlane fitGroundPlane(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane* previous = nullptr);
 
 // A point in the bird's-eye view: coordinates on the ground plane, with the lidar above the origin
@@ -36,10 +38,14 @@ struct BirdEyePoint {
     float left;         // Perpendicular to forward, to the left (lidar y side) [m]
     float height;       // Above the ground [m]
     QVector3D color;    // RGB [0, 1]
+    uint8_t label = NO_LABEL;   // Segmentation class, NO_LABEL when not segmented or not seen by a camera
+
+    static constexpr uint8_t NO_LABEL = 255;
 };
 
-// Projects the cloud on the ground plane
-std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane);
+// Projects the cloud on the ground plane. labels (optional, one per point): segmentation class per point
+std::vector<BirdEyePoint> projectToGround(const std::vector<vaiop::QtPoint>& cloud, const GroundPlane& plane,
+                                          const std::vector<uint8_t>* labels = nullptr);
 
 // A blob in the bird's-eye view: its centre projected on the ground plane
 struct BirdEyeBlob {
@@ -70,3 +76,4 @@ struct BirdEyeView {
 // Renders the points top-down (RGB, CV_8UC3, background colour bg). Where points overlap, the highest is shown,
 // so objects are drawn on top of the ground below them.
 cv::Mat renderBirdEye(const std::vector<BirdEyePoint>& points, const BirdEyeView& view, const cv::Vec3b& bg);
+

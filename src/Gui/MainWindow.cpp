@@ -1,34 +1,50 @@
 #include <Gui/MainWindow.h>
 #include <Gui/Theme.h>
-#include <Utils/AsyncWriter.h>
 
 #include <QApplication>
 #include <QDebug>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QMessageBox>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <cstdlib>
 
 namespace {
-    uint64_t hostTimeMicros()
+    QImage toQImage(const cv::Mat& imageRGB)
     {
-        return std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now()).time_since_epoch().count();
+        return QImage(imageRGB.data, imageRGB.cols, imageRGB.rows, static_cast<qsizetype>(imageRGB.step), QImage::Format_RGB888).copy();
     }
-}
 
-namespace {
-    // Maximum time to wait for a camera frame after the trigger (a frame normally arrives within one camera period)
-    constexpr auto MAX_CAMERA_WAIT = std::chrono::milliseconds(150);
-    // A camera frame further than this from the trigger timestamp is not logged (half the 10 Hz period)
-    constexpr uint64_t MAX_SYNC_OFFSET_US = 50000;
-    // Trigger period when no lidar is connected (preview + recording continue at 10 Hz)
-    constexpr auto SOFT_TRIGGER_PERIOD = std::chrono::milliseconds(100);
-    // Acquisition poll period
-    constexpr int TICK_MS = 5;
+    // A row of a recording folder as a frame of the pipeline (not live, not recorded)
+    std::shared_ptr<const Frame> toFrame(const RecordedFrame& recorded)
+    {
+        auto frame = std::make_shared<Frame>();
+        frame->live = false;
+        frame->lidar = recorded.lidar;
+        frame->triggerTs = recorded.lidar.ts;
+        frame->cloud = recorded.pointCloud;
+        frame->robot = recorded.robot;
+        frame->cameras.resize(recorded.cameras.size());
+        for (size_t i = 0; i < recorded.cameras.size(); ++i) {
+            CameraSample& sample = frame->cameras[i];
+            sample.meta = recorded.cameras[i];
+            sample.ip = sample.meta.ip;
+            sample.open = true;
+            sample.fps = sample.meta.fps;
+            sample.frameId = sample.meta.frameId;
+            if (i < recorded.images.size() && !recorded.images[i].isNull()) {
+                const QImage rgb = recorded.images[i].convertToFormat(QImage::Format_RGB888);
+                sample.image = cv::Mat(rgb.height(), rgb.width(), CV_8UC3, const_cast<uchar*>(rgb.constBits()),
+                                       static_cast<size_t>(rgb.bytesPerLine())).clone();
+                sample.colourImage = sample.image;
+                sample.newFrame = true;
+            }
+        }
+        return frame;
+    }
 }
 
 
@@ -41,15 +57,24 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
     for (const CameraInfo& camInfo : config.cameras) {
         calibs.push_back(loadCameraCalib(camInfo.calibFileName, camInfo.name));
     }
-    colorizer = CameraColorizer(std::move(calibs));
-    rotationWarned.assign(config.cameras.size(), false);
+    colorizer = CameraColorizer(calibs);
 
-    // Segmentation model on a background thread; its results are shown on the GUI thread
-    segmentation = std::make_unique<SegmentationWorker>(config.segmentation, colorizer, [this](SegmentationWorker::Result result) {
-        QMetaObject::invokeMethod(this, [this, result]() { showSegmentation(result); }, Qt::QueuedConnection);
-    });
+    // The pipeline, from the recording up to the sensors
+    recorder = std::make_unique<Recorder>(config, calibs);
+    segmentation = std::make_unique<SegmentationWorker>(config.segmentation, config.occupancyMap, colorizer,
+        [this](SegmentationWorker::Result result) { onSegmented(std::move(result)); },
+        [this](SegmentationWorker::DeviceStatus status) {
+            QMetaObject::invokeMethod(this, [this, status]() { showSegmentationDevice(status); }, Qt::QueuedConnection);
+        });
     if (!config.segmentation.modelDir.empty() && !segmentation->isAvailable()) {
         qWarning().noquote() << QString::fromStdString(segmentation->error());
+    } else if (segmentation->isAvailable()) {
+        recorder->setClassNames(segmentation->classNames());
+        const SegmentationWorker::DeviceStatus status = segmentation->deviceStatus();
+        qInfo().noquote() << "Segmentation runs on the" << Segmenter::deviceName(status.device);
+        if (!status.gpuError.empty() && config.segmentation.device != "cpu") {
+            qWarning().noquote() << "Segmentation not on the GPU:" << QString::fromStdString(status.gpuError);
+        }
     }
 
     colorMode = colorModeFromString(config.pointCloudColor);
@@ -60,8 +85,32 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
 
     setupUI();
 
-    // Connect the sensors after the window is shown, so the user sees the progress
-    QTimer::singleShot(0, this, [this]() { connectSensors(); });
+    processor = std::make_unique<Processor>(config.occupancyMap, colorizer, recorder.get(), segmentation.get(),
+        [this](std::shared_ptr<const ProcessedFrame> frame) { onProcessed(std::move(frame)); });
+    processor->setColorMode(colorMode, tag);
+
+    acquisition = std::make_unique<Acquisition>(config, calibs,
+        [this]() { return recorder->isRecording(); },
+        [this](std::shared_ptr<const Frame> frame) { processor->submit(std::move(frame)); },
+        [this](Acquisition::Connection connection) {
+            QMetaObject::invokeMethod(this, [this, connection]() { onConnected(connection); }, Qt::QueuedConnection);
+        });
+    acquisition->start();
+
+    connect(&statusTimer, &QTimer::timeout, this, [this]() { updateStatus(); });
+    statusTimer.start(250);
+}
+
+MainWindow::~MainWindow()
+{
+    statusTimer.stop();
+    // From the sensors down: every stage finishes what it has before the next one stops
+    acquisition->stop();
+    processor->stop();
+    segmentation.reset();
+    if (recorder->isRecording()) {
+        recorder->stop();   // Writes what is still queued
+    }
 }
 
 void MainWindow::setupUI()
@@ -86,14 +135,22 @@ void MainWindow::setupUI()
     titleBox->addWidget(appSubtitle);
     titleBox->addStretch();
 
-    recordWidget = new RecordWidget(central, static_cast<int>(config.cameras.size()));
+    recordWidget = new RecordWidget(central);
     replayWidget = new ReplayWidget(central);
     headerStack = new QStackedWidget(central);
     headerStack->addWidget(recordWidget);
     headerStack->addWidget(replayWidget);
+    recordWidget->setRecordingAvailable(Recorder::isAvailable(), "Built without ROS 2 (/opt/ros/jazzy): no recording");
     connect(recordWidget, &RecordWidget::replayRequested, this, [this]() { startReplay(); });
+    connect(recordWidget, &RecordWidget::recordingChanged, this, [this](bool recording) {
+        if (recording) {
+            startRecording();
+        } else {
+            stopRecording();
+        }
+    });
     connect(replayWidget, &ReplayWidget::liveRequested, this, [this]() { stopReplay(); });
-    connect(replayWidget, &ReplayWidget::frameLoaded, this, [this](const RecordedFrame& frame) { showRecordedFrame(frame); });
+    connect(replayWidget, &ReplayWidget::frameLoaded, this, [this](const RecordedFrame& frame) { processReplayFrame(frame); });
     robotWidget = new RobotWidget(central);
     robotWidget->setHost(QString("%1:%2").arg(QString::fromStdString(config.robotHost)).arg(config.robotPort));
 
@@ -123,10 +180,17 @@ void MainWindow::setupUI()
         lidarWidget->setLegend({}, "Segmenting…");
     }
     lidarWidget->onColorModeChanged([this](ColorMode mode) { setColorMode(mode); });
+    lidarWidget->setOccupancyHeightRange(config.occupancyMap.minHeight, config.occupancyMap.maxHeight);
+    const SegmentationWorker::DeviceStatus deviceStatus = segmentation->deviceStatus();
+    lidarWidget->setSegmentationDevice(deviceStatus.device, QString::fromStdString(deviceStatus.gpuError));
+    lidarWidget->onSegmentationDeviceChanged([this](Segmenter::Device device) {
+        segmentation->setDevice(device);
+        statusBar()->showMessage(QString("Loading the segmentation model on the %1…").arg(Segmenter::deviceName(device)));
+    });
     lidarWidget->onImageOverlayChanged([this](bool) {
-        // Live: the next scan shows the change; a replay shows the current row again
+        // Live: the next scan shows the change; a replay processes the current row again
         if (replaying && lastReplayFrame.pointCloud) {
-            showRecordedFrame(lastReplayFrame);
+            processReplayFrame(lastReplayFrame);
         }
     });
 
@@ -159,167 +223,75 @@ void MainWindow::setupUI()
     triggerStatus->setText("Connecting to the sensors…");
 }
 
-void MainWindow::connectSensors()
+void MainWindow::onConnected(const Acquisition::Connection& connection)
 {
-    // Robot (polled in the background, never blocks the GUI)
-    robotPtr = std::make_unique<ArtofRobot>(config.robotHost, config.robotPort);
-    robotPtr->startPolling();
-
-    // Cameras
-    for (size_t i = 0; i < config.cameras.size(); ++i) {
-        const CameraInfo& camInfo = config.cameras[i];
-        QApplication::processEvents();
-        auto camPtr = std::make_shared<Daheng>(camInfo.name, camInfo.ip, camInfo.rFlag, camInfo.calibFileName);
-        if (camPtr->isOpen()) {
-            camPtr->start();
-            cameraWidgets[i]->setInfo(camInfo.ip, 0.0, 0, Theme::Status::Waiting);
-            cameraWidgets[i]->setRotation(camPtr->getRotation());
-            cameraWidgets[i]->onRotateClicked([this, i]() { rotateCamera(i); });
+    for (size_t i = 0; i < cameraWidgets.size() && i < connection.cameraErrors.size(); ++i) {
+        const std::string& ip = config.cameras[i].ip;
+        if (connection.cameraErrors[i].empty()) {
+            cameraWidgets[i]->setInfo(ip, 0.0, 0, Theme::Status::Waiting);
+            cameraWidgets[i]->setRotation(connection.cameraRotations[i]);
+            cameraWidgets[i]->onRotateClicked([this, i]() { cameraWidgets[i]->setRotation(acquisition->rotateCamera(i)); });
         } else {
-            cameraWidgets[i]->setOffline(camInfo.ip, QString("Cannot open camera at %1").arg(QString::fromStdString(camInfo.ip)));
+            cameraWidgets[i]->setOffline(ip, QString::fromStdString(connection.cameraErrors[i]));
         }
-        cameras.push_back(camPtr);
     }
-    lastCameraSequence.assign(cameras.size(), 0);
-
-    // Lidar
-    QApplication::processEvents();
-    try {
-        lidarPtr = std::make_unique<Ouster>(config.lidarIp);
+    if (connection.lidarError.empty()) {
         lidarWidget->setInfo(config.lidarIp, 0.0, 0, 0, Theme::Status::Waiting);
-    } catch (const std::exception& e) {
-        qWarning() << "Lidar not available:" << e.what();
-        lidarPtr.reset();
+    } else {
         lidarOfflineReason = QString("Lidar not reachable at %1\n%2\n\nCameras are triggered at 10 Hz instead.")
-            .arg(QString::fromStdString(config.lidarIp), e.what());
+            .arg(QString::fromStdString(config.lidarIp), QString::fromStdString(connection.lidarError));
         if (!replaying) {
             lidarWidget->setOffline(config.lidarIp, lidarOfflineReason);
         }
     }
-
-    // Reset them back-to-back to sync their timers
-    if (lidarPtr) {
-        lidarPtr->resetTimestamp();
-    }
-    for (auto& camPtr : cameras) {
-        camPtr->resetTimestamp();
-    }
-
-    liveTriggerText = lidarPtr ? "Trigger: lidar scans" : "Trigger: 10 Hz timer (no lidar)";
+    liveTriggerText = connection.lidarError.empty() ? "Trigger: lidar scans" : "Trigger: 10 Hz timer (no lidar)";
     if (!replaying) {
         triggerStatus->setText(liveTriggerText);
     }
-
-    connect(&acquisitionTimer, &QTimer::timeout, this, [this]() { onTick(); });
-    acquisitionTimer.start(TICK_MS);
-    connect(&statusTimer, &QTimer::timeout, this, [this]() { updateStatus(); });
-    statusTimer.start(250);
 }
 
-void MainWindow::onTick()
+void MainWindow::onProcessed(std::shared_ptr<const ProcessedFrame> frame)
 {
-    // Keep reading the lidar while replaying, so live starts from a fresh scan instead of a backlog
-    if (replaying) {
-        waitForTrigger();
-        return;
-    }
-
-    // A new trigger starts a row, also while earlier rows are still waiting for their camera frames
-    if (waitForTrigger()) {
-        startCapture();
-    }
-
-    // Finish the rows in trigger order, without blocking the event loop.
-    // Only the newest scan is coloured: an older one would be replaced right away, and colouring every
-    // row of a backlog keeps the event loop busy.
-    while (!pending.empty() && captureComplete(pending.front())) {
-        const bool newerScan = std::any_of(pending.begin() + 1, pending.end(), [](const PendingCapture& c) { return c.pointCloud != nullptr; });
-        finishCapture(pending.front(), !newerScan);
-        pending.pop_front();
+    std::lock_guard<std::mutex> lock(latestMutex);
+    latestFrame = std::move(frame);
+    if (!frameScheduled) {
+        frameScheduled = true;
+        QMetaObject::invokeMethod(this, [this]() {
+            std::shared_ptr<const ProcessedFrame> newest;
+            {
+                std::lock_guard<std::mutex> lock(latestMutex);
+                newest = std::move(latestFrame);
+                frameScheduled = false;
+            }
+            if (newest) {
+                showFrame(*newest);
+            }
+        }, Qt::QueuedConnection);
     }
 }
 
-void MainWindow::rotateCamera(size_t index)
+void MainWindow::onSegmented(SegmentationWorker::Result result)
 {
-    auto& camPtr = cameras[index];
-    camPtr->setRotation(camPtr->getRotation() + 90);
-    cameraWidgets[index]->setRotation(camPtr->getRotation());
-}
-
-void MainWindow::startReplay()
-{
-    const QString startFolder = replayWidget->recording().size() > 0 ? replayWidget->recording().folder() : recordWidget->folder();
-    if (!replayWidget->chooseRecording(startFolder)) {
-        return;
+    // Recorded here, on the worker thread: also the results that are not shown any more
+    if (result.frame && result.frame->record) {
+        recorder->writeSegmentation(*result.frame, result.cloud, result.labels, result.classMap);
     }
-
-    replaying = true;
-    segmentationTag++;
-    pending.clear();    // Rows waiting for camera frames are only previews: replay never starts while recording
-    headerStack->setCurrentWidget(replayWidget);
-    for (CameraWidget* cameraWidget : cameraWidgets) {
-        cameraWidget->setRotateEnabled(false);
+    std::lock_guard<std::mutex> lock(latestMutex);
+    latestSegmentation = std::move(result);
+    if (!segmentationScheduled) {
+        segmentationScheduled = true;
+        QMetaObject::invokeMethod(this, [this]() {
+            std::optional<SegmentationWorker::Result> newest;
+            {
+                std::lock_guard<std::mutex> lock(latestMutex);
+                newest.swap(latestSegmentation);
+                segmentationScheduled = false;
+            }
+            if (newest) {
+                showSegmentation(*newest);
+            }
+        }, Qt::QueuedConnection);
     }
-    triggerStatus->setText(QString("Replay: %1").arg(replayWidget->recording().logFile()));
-}
-
-void MainWindow::stopReplay()
-{
-    replaying = false;
-    segmentationTag++;
-    headerStack->setCurrentWidget(recordWidget);
-
-    // Back to the live state of each sensor; the next trigger shows fresh data
-    for (size_t i = 0; i < cameraWidgets.size(); ++i) {
-        cameraWidgets[i]->setRotateEnabled(true);
-        if (i >= cameras.size()) {
-            cameraWidgets[i]->showMessage("Connecting…");
-        } else if (!cameras[i]->isOpen()) {
-            cameraWidgets[i]->setOffline(cameras[i]->getIp(), QString("Cannot open camera at %1").arg(QString::fromStdString(cameras[i]->getIp())));
-        } else {
-            cameraWidgets[i]->showMessage("Waiting for a frame…");
-            cameraWidgets[i]->setInfo(cameras[i]->getIp(), cameras[i]->getFps(), cameras[i]->getFrameId(), Theme::Status::Waiting);
-        }
-    }
-    if (lidarPtr) {
-        lidarWidget->showMessage("Waiting for a scan…");
-        lidarWidget->setInfo(lidarPtr->getIp(), lidarPtr->getFps(), lidarPtr->getFrameId(), 0, Theme::Status::Waiting);
-    } else if (!lidarOfflineReason.isEmpty()) {
-        lidarWidget->setOffline(config.lidarIp, lidarOfflineReason);
-    } else {
-        lidarWidget->showMessage("Connecting…");
-    }
-    if (robotPtr == nullptr) {
-        robotWidget->setOffline("Connecting…");
-    }
-    triggerStatus->setText(liveTriggerText.isEmpty() ? "Connecting to the sensors…" : liveTriggerText);
-}
-
-void MainWindow::setColorMode(ColorMode mode)
-{
-    colorMode = mode;
-    segmentationTag++;
-    if (mode == ColorMode::Segmentation) {
-        lidarWidget->setLegend({}, "Segmenting…");
-    } else {
-        lidarWidget->clearLegend();
-    }
-    if (mode != ColorMode::Distance && colorizer.validCount() == 0) {
-        statusBar()->showMessage(QString("No camera calibration in %1: the point cloud stays grey")
-            .arg(QString::fromStdString(config.calibFileName)), 8000);
-    }
-    // Live rows pick up the new mode with the next scan; a replay shows the current row again
-    if (replaying && lastReplayFrame.pointCloud) {
-        showRecordedFrame(lastReplayFrame);
-    }
-}
-
-std::shared_ptr<std::vector<vaiop::QtPoint>> MainWindow::colorWithCameras(const std::vector<vaiop::QtPoint>& cloud,
-                                                                          const std::vector<cv::Mat>& imagesRGB) const
-{
-    auto colored = std::make_shared<std::vector<vaiop::QtPoint>>(cloud);
-    colorizer.colorize(*colored, imagesRGB);
-    return colored;
 }
 
 bool MainWindow::showingOverlay() const
@@ -327,19 +299,73 @@ bool MainWindow::showingOverlay() const
     return colorMode == ColorMode::Segmentation && segmentation->isAvailable() && lidarWidget->imageOverlay();
 }
 
+void MainWindow::showFrame(const ProcessedFrame& processed)
+{
+    const Frame& frame = *processed.frame;
+    if (frame.live == replaying) {
+        return;     // A live frame during a replay, or a replay frame after returning to live
+    }
+
+    for (size_t i = 0; i < cameraWidgets.size(); ++i) {
+        CameraWidget* tile = cameraWidgets[i];
+        if (i >= frame.cameras.size()) {
+            if (!frame.live) {
+                tile->showMessage("Not in this recording");
+                tile->setInfo("", 0.0, 0, Theme::Status::Offline);
+            }
+            continue;
+        }
+        const CameraSample& camera = frame.cameras[i];
+        if (frame.live && !camera.open) {
+            continue;   // Shows why since connecting
+        }
+        if (camera.newFrame) {
+            // With the image overlay the tile shows the segmented frame when the worker is done (showSegmentation)
+            if (!(showingOverlay() && frame.cloud)) {
+                tile->setImage(toQImage(camera.image));
+            }
+            tile->setInfo(camera.ip, camera.meta.fps, camera.meta.frameId, Theme::Status::Ok);
+        } else {
+            if (!frame.live) {
+                tile->showMessage(camera.meta.imPath.empty() ? "No image in this row"
+                                                             : QString("Cannot read %1").arg(QString::fromStdString(camera.meta.imPath)));
+            }
+            tile->setInfo(camera.ip, camera.fps, camera.frameId, Theme::Status::Waiting);
+        }
+    }
+
+    if (frame.cloud) {
+        // In segmentation mode the cloud is shown when the worker is done (showSegmentation)
+        if (processed.displayCloud) {
+            lidarWidget->setScene(processed.displayCloud, processed.plane, processed.occupancy);
+        }
+        lidarWidget->setInfo(frame.lidar.ip, frame.lidar.fps, frame.lidar.frameId, frame.cloud->size(), Theme::Status::Ok);
+    } else if (!frame.live) {
+        lidarWidget->showMessage(frame.lidar.pcPath.empty() ? "No point cloud in this row"
+                                                            : QString("Cannot read %1").arg(QString::fromStdString(frame.lidar.pcPath)));
+        lidarWidget->setInfo(frame.lidar.ip, frame.lidar.fps, frame.lidar.frameId, 0, Theme::Status::Waiting);
+    }
+
+    if (frame.robot.valid) {
+        robotWidget->setMetaData(frame.robot);
+    } else if (frame.live) {
+        robotWidget->setOffline(frame.robotError.empty() ? "Connecting…" : QString("Offline: %1").arg(QString::fromStdString(frame.robotError)));
+    } else {
+        robotWidget->setOffline("No robot data in this row");
+    }
+}
+
 void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
 {
     // Outdated: another colour mode, or switched between live and replay since the job was submitted
-    if (result.tag != segmentationTag || colorMode != ColorMode::Segmentation) {
+    if (result.tag != tag || colorMode != ColorMode::Segmentation || !result.frame || result.frame->live == replaying) {
         return;
     }
-    lidarWidget->setPointCloud(result.cloud, result.labels, segmentation->palette());
+    lidarWidget->setScene(result.cloud, result.plane, result.classMap, result.labels, segmentation->palette());
     if (showingOverlay()) {
         for (size_t i = 0; i < result.overlays.size() && i < cameraWidgets.size(); ++i) {
-            const cv::Mat& overlay = result.overlays[i];
-            if (!overlay.empty()) {
-                cameraWidgets[i]->setImage(QImage(overlay.data, overlay.cols, overlay.rows, static_cast<qsizetype>(overlay.step),
-                                                  QImage::Format_RGB888).copy());
+            if (!result.overlays[i].empty()) {
+                cameraWidgets[i]->setImage(toQImage(result.overlays[i]));
             }
         }
     }
@@ -367,239 +393,121 @@ void MainWindow::showSegmentation(const SegmentationWorker::Result& result)
         }
         entries.push_back({QString::fromStdString(names[k]), QColor(palette[k][0], palette[k][1], palette[k][2]), share});
     }
-    lidarWidget->setLegend(entries, QString("%1k of %2k points labelled · %3 ms")
-        .arg(labelled / 1000).arg(result.cloud->size() / 1000).arg(result.ms, 0, 'f', 0));
+    lidarWidget->setLegend(entries, QString("%1k of %2k points labelled · %3 ms (%4)")
+        .arg(labelled / 1000).arg(result.cloud->size() / 1000).arg(result.ms, 0, 'f', 0).arg(Segmenter::deviceName(result.device)));
 }
 
-void MainWindow::showRecordedFrame(const RecordedFrame& frame)
+void MainWindow::showSegmentationDevice(const SegmentationWorker::DeviceStatus& status)
+{
+    const QString gpuError = QString::fromStdString(status.gpuError);
+    lidarWidget->setSegmentationDevice(status.device, gpuError);
+    if (status.device == Segmenter::Device::Gpu || gpuError.isEmpty()) {
+        statusBar()->showMessage(QString("Segmentation runs on the %1").arg(Segmenter::deviceName(status.device)), 5000);
+    } else {
+        // The GPU was asked for but is not usable: the model stays on the CPU
+        qWarning().noquote() << "Segmentation not on the GPU:" << gpuError;
+        statusBar()->showMessage("GPU not available, segmentation runs on the CPU: " + gpuError, 15000);
+    }
+}
+
+void MainWindow::startReplay()
+{
+    if (!replayWidget->chooseRecording(replayWidget->recording().size() > 0 ? replayWidget->recording().folder() : recordWidget->folder())) {
+        return;
+    }
+    replaying = true;
+    acquisition->setPaused(true);   // Replay never starts while recording (the button is disabled then)
+    processor->setColorMode(colorMode, ++tag);
+    headerStack->setCurrentWidget(replayWidget);
+    for (CameraWidget* cameraWidget : cameraWidgets) {
+        cameraWidget->setRotateEnabled(false);
+    }
+    triggerStatus->setText(QString("Replay: %1").arg(replayWidget->recording().logFile()));
+}
+
+void MainWindow::stopReplay()
+{
+    replaying = false;
+    acquisition->setPaused(false);
+    processor->setColorMode(colorMode, ++tag);
+    headerStack->setCurrentWidget(recordWidget);
+
+    // Back to the live state of each sensor; the next row shows fresh data
+    for (CameraWidget* cameraWidget : cameraWidgets) {
+        cameraWidget->setRotateEnabled(true);
+        cameraWidget->showMessage("Waiting for a frame…");
+    }
+    if (!lidarOfflineReason.isEmpty()) {
+        lidarWidget->setOffline(config.lidarIp, lidarOfflineReason);
+    } else {
+        lidarWidget->showMessage("Waiting for a scan…");
+    }
+    triggerStatus->setText(liveTriggerText.isEmpty() ? "Connecting to the sensors…" : liveTriggerText);
+}
+
+void MainWindow::processReplayFrame(const RecordedFrame& recorded)
 {
     if (!replaying) {
         return;
     }
-    lastReplayFrame = frame;
+    lastReplayFrame = recorded;
+    processor->submit(toFrame(recorded));
+}
 
-    if (frame.pointCloud) {
-        if (colorMode == ColorMode::Rgb || colorMode == ColorMode::Segmentation) {
-            std::vector<cv::Mat> imagesRGB(frame.images.size());
-            for (size_t i = 0; i < frame.images.size(); ++i) {
-                if (!frame.images[i].isNull()) {
-                    const QImage rgb = frame.images[i].convertToFormat(QImage::Format_RGB888);
-                    imagesRGB[i] = cv::Mat(rgb.height(), rgb.width(), CV_8UC3, const_cast<uchar*>(rgb.constBits()),
-                                           static_cast<size_t>(rgb.bytesPerLine())).clone();
-                }
-            }
-            if (colorMode == ColorMode::Rgb) {
-                lidarWidget->setPointCloud(colorWithCameras(*frame.pointCloud, imagesRGB));
-            } else {
-                // Shown when the worker is done (showSegmentation)
-                segmentation->submit({segmentationTag, frame.pointCloud, std::move(imagesRGB)});
-            }
-        } else {
-            lidarWidget->setPointCloud(frame.pointCloud);
-        }
-        lidarWidget->setInfo(frame.lidar.ip, frame.lidar.fps, frame.lidar.frameId, frame.pointCloud->size(), Theme::Status::Ok);
+void MainWindow::setColorMode(ColorMode mode)
+{
+    colorMode = mode;
+    processor->setColorMode(mode, ++tag);
+    if (mode == ColorMode::Segmentation) {
+        lidarWidget->setLegend({}, "Segmenting…");
     } else {
-        lidarWidget->showMessage(frame.lidar.pcPath.empty() ? "No point cloud in this row" : QString("Cannot read %1").arg(QString::fromStdString(frame.lidar.pcPath)));
-        lidarWidget->setInfo(frame.lidar.ip, frame.lidar.fps, frame.lidar.frameId, 0, Theme::Status::Waiting);
+        lidarWidget->clearLegend();
     }
-
-    for (size_t i = 0; i < cameraWidgets.size(); ++i) {
-        if (i >= frame.cameras.size()) {
-            cameraWidgets[i]->showMessage("Not in this recording");
-            cameraWidgets[i]->setInfo("", 0.0, 0, Theme::Status::Offline);
-            continue;
-        }
-        const CameraMetaData& camMetaData = frame.cameras[i];
-        if (!frame.images[i].isNull()) {
-            if (!(showingOverlay() && frame.pointCloud)) {
-                cameraWidgets[i]->setImage(frame.images[i]);
-            }
-            cameraWidgets[i]->setInfo(camMetaData.ip, camMetaData.fps, camMetaData.frameId, Theme::Status::Ok);
-        } else {
-            cameraWidgets[i]->showMessage(camMetaData.imPath.empty() ? "No image in this row" : QString("Cannot read %1").arg(QString::fromStdString(camMetaData.imPath)));
-            cameraWidgets[i]->setInfo(camMetaData.ip, camMetaData.fps, camMetaData.frameId, Theme::Status::Waiting);
-        }
+    if (mode != ColorMode::Distance && colorizer.validCount() == 0) {
+        statusBar()->showMessage(QString("No camera calibration in %1: the point cloud stays grey")
+            .arg(QString::fromStdString(config.calibFileName)), 8000);
     }
-
-    if (frame.robot.valid) {
-        robotWidget->setMetaData(frame.robot);
-    } else {
-        robotWidget->setOffline("No robot data in this row");
+    // Live rows pick up the new mode with the next scan; a replay processes the current row again
+    if (replaying && lastReplayFrame.pointCloud) {
+        processReplayFrame(lastReplayFrame);
     }
 }
 
-bool MainWindow::waitForTrigger()
+void MainWindow::startRecording()
 {
-    // All image collection is initiated by the lidar scan
-    if (lidarPtr) {
-        return lidarPtr->scan();
+    std::string error;
+    if (!recorder->start(recordWidget->folder().toStdString(), error)) {
+        qWarning().noquote() << QString::fromStdString(error);
+        QMessageBox::warning(this, "Recording", QString::fromStdString(error));
+        recordWidget->stop();
+        return;
     }
-
-    // Without lidar: software trigger
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastSoftTrigger >= SOFT_TRIGGER_PERIOD) {
-        lastSoftTrigger = now;
-        return true;
-    }
-    return false;
+    statusBar()->showMessage("Recording to " + QString::fromStdString(recorder->uri()), 5000);
 }
 
-std::string MainWindow::recordPath(const QString& relative) const
+void MainWindow::stopRecording()
 {
-    return (recordWidget->folder() + "/" + relative).toStdString();
-}
-
-void MainWindow::startCapture()
-{
-    PendingCapture capture;
-    capture.deadline = std::chrono::steady_clock::now() + MAX_CAMERA_WAIT;
-    capture.record = recordWidget->isRecording();
-    // Rows still waiting for their cameras will take the indices before this one
-    const auto pendingRecordRows = std::count_if(pending.begin(), pending.end(), [](const PendingCapture& c) { return c.record; });
-    capture.fileIndex = recordWidget->rowCount() + pendingRecordRows;
-
-    // Lidar
-    if (lidarPtr) {
-        auto pc = lidarPtr->getPointCloud();
-        lidarPtr->getMetaData(capture.lidar);
-        if (pc != nullptr) {
-            // RGB and segmentation: shown when the camera frames of the row are in (finishCapture)
-            capture.pointCloud = pc;
-            if (colorMode == ColorMode::Distance) {
-                lidarWidget->setPointCloud(pc);
-            }
-            lidarWidget->setInfo(lidarPtr->getIp(), lidarPtr->getFps(), lidarPtr->getFrameId(), pc->size(), Theme::Status::Ok);
-            if (capture.record) {
-                const QString relativeFileName = QString("lidar/%1.ply").arg(capture.fileIndex, 6, 10, QChar('0'));
-                if (lidarPtr->savePLY(recordPath(relativeFileName))) {
-                    capture.lidar.pcPath = relativeFileName.toStdString();
-                }
-            }
-        }
-    } else {
-        capture.lidar.ip = config.lidarIp;
+    if (!recorder->isRecording()) {
+        return;
     }
-    capture.triggerTs = capture.lidar.ts != 0 ? capture.lidar.ts : hostTimeMicros();
-
-    // Robot: latest state from the background poller
-    if (robotPtr) {
-        capture.robot = robotPtr->getLatest();
-        if (capture.robot.valid) {
-            robotWidget->setMetaData(capture.robot);
-        } else {
-            const std::string error = robotPtr->getLastError();
-            robotWidget->setOffline(error.empty() ? "Connecting…" : QString("Offline: %1").arg(QString::fromStdString(error)));
-        }
-    }
-
-    pending.push_back(std::move(capture));
-}
-
-bool MainWindow::captureComplete(const PendingCapture& capture) const
-{
-    if (std::chrono::steady_clock::now() >= capture.deadline) {
-        return true;
-    }
-
-    // Done when every streaming camera has a frame at or after the trigger: later frames can only be further away
-    return std::all_of(cameras.begin(), cameras.end(), [&capture](const std::shared_ptr<Daheng>& camPtr) {
-        return !camPtr->isAcquiring() || (camPtr->getFrameSequence() > 0 && camPtr->getTimeStamp() >= capture.triggerTs);
-    });
-}
-
-void MainWindow::finishCapture(const PendingCapture& capture, bool showCloud)
-{
-    const bool record = capture.record && recordWidget->isRecording();
-    std::vector<CameraMetaData> cameraMetaData(cameras.size());
-    std::vector<cv::Mat> imagesRGB(cameras.size());
-
-    for (size_t i = 0; i < cameras.size(); i++) {
-        auto& camPtr = cameras[i];
-        CameraMetaData& camMetaData = cameraMetaData[i];
-        camMetaData.ip = camPtr->getIp();
-
-        // The frame closest to the trigger, if it is close enough and not logged in the previous row
-        Daheng::Frame frame;
-        const bool found = camPtr->isAcquiring() && camPtr->getFrameNear(capture.triggerTs, frame);
-        const uint64_t offset = found ? static_cast<uint64_t>(std::llabs(static_cast<int64_t>(frame.ts - capture.triggerTs))) : 0;
-
-        // Colour the point cloud with every frame close to the trigger (also one already logged in the previous row),
-        // as long as the camera is rotated as during the calibration
-        if (found && offset <= MAX_SYNC_OFFSET_US && i < colorizer.calibs().size()) {
-            const int calibRotation = colorizer.calibs()[i].rotationDeg;
-            if (calibRotation < 0 || calibRotation == camPtr->getRotation()) {
-                imagesRGB[i] = frame.image;
-            } else if (!rotationWarned[i]) {
-                rotationWarned[i] = true;
-                qWarning().noquote() << QString("%1 is rotated %2°, but calibrated at %3°: not used to colour the point cloud")
-                    .arg(QString::fromStdString(camPtr->getName())).arg(camPtr->getRotation()).arg(calibRotation);
-            }
-        }
-        if (!found || offset > MAX_SYNC_OFFSET_US || frame.sequence <= lastCameraSequence[i]) {
-            if (camPtr->isOpen()) {
-                cameraWidgets[i]->setInfo(camPtr->getIp(), camPtr->getFps(), camPtr->getFrameId(), Theme::Status::Waiting);
-            }
-            continue;
-        }
-        lastCameraSequence[i] = frame.sequence;
-
-        // With the image overlay the tile shows the segmented frame when the worker is done (showSegmentation)
-        if (!(showingOverlay() && capture.pointCloud)) {
-            const QImage view(frame.image.data, frame.image.cols, frame.image.rows, static_cast<qsizetype>(frame.image.step), QImage::Format_RGB888);
-            cameraWidgets[i]->setImage(view.copy());
-        }
-        cameraWidgets[i]->setInfo(camPtr->getIp(), camPtr->getFps(), frame.frameId, Theme::Status::Ok);
-
-        camPtr->getMetaData(frame, camMetaData);
-        camMetaData.valid = true;
-        if (record) {
-            const QString relativeFileName = QString("cam%1/%2.png").arg(i + 1).arg(capture.fileIndex, 6, 10, QChar('0'));
-            if (Daheng::saveFrame(frame, recordPath(relativeFileName))) {
-                camMetaData.imPath = relativeFileName.toStdString();
-            }
-        }
-    }
-
-    if (showCloud && capture.pointCloud) {
-        if (colorMode == ColorMode::Rgb) {
-            lidarWidget->setPointCloud(colorWithCameras(*capture.pointCloud, imagesRGB));
-        } else if (colorMode == ColorMode::Segmentation) {
-            // The worker keeps only the newest job, so it never falls behind the scans
-            segmentation->submit({segmentationTag, capture.pointCloud, std::move(imagesRGB)});
-        }
-    }
-
-    if (record) {
-        recordWidget->logData(capture.robot, cameraMetaData, capture.lidar);
-    }
+    const QString uri = QString::fromStdString(recorder->uri());
+    recorder->stop();   // Writes what is still queued
+    const uint64_t rows = recorder->rows();
+    const size_t dropped = recorder->dropped();
+    recordWidget->setRowCount(rows);
+    statusBar()->showMessage(QString("Saved %1 rows: %2%3").arg(rows).arg(uri)
+        .arg(dropped > 0 ? QString(" (%1 messages dropped)").arg(dropped) : QString()), 10000);
 }
 
 void MainWindow::updateStatus()
 {
-    AsyncWriter& writer = AsyncWriter::instance();
-    const size_t queued = writer.pending();
-    const size_t dropped = writer.dropped();
-    QString text = QString("Write queue: %1").arg(queued);
-    if (dropped > 0) {
-        text += QString(" · <span style='color:%1'>%2 files dropped (disk too slow)</span>").arg(Theme::error.name()).arg(dropped);
+    QString text;
+    if (recorder->isRecording()) {
+        recordWidget->setRowCount(recorder->rows());
+        text = QString("Rosbag queue: %1").arg(recorder->pending());
+        if (const size_t dropped = recorder->dropped(); dropped > 0) {
+            text += QString(" · <span style='color:%1'>%2 messages dropped (disk too slow)</span>").arg(Theme::error.name()).arg(dropped);
+        }
     }
     writerStatus->setText(text);
-}
-
-MainWindow::~MainWindow()
-{
-    acquisitionTimer.stop();
-    statusTimer.stop();
-
-    if (robotPtr) {
-        robotPtr->stopPolling();
-    }
-
-    // Stop all camera acquisition
-    for (auto& camPtr : cameras) {
-        camPtr->stop();
-    }
-
-    // Make sure every queued image / point cloud is written before exiting
-    AsyncWriter::instance().flush();
 }

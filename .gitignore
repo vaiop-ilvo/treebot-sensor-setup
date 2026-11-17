@@ -1,4 +1,6 @@
 __pycache__/
+# Python virtual environments (scripts/.venv, see scripts/requirements.txt)
+.venv/
 python/build/
 python/dist/
 python/.tox/
@@ -8,6 +10,7 @@ python/**/*.dll
 python/**/*.pyd
 
 /build
+/build-*/
 python/artifacts/
 
 # visual studio

@@ -1,5 +1,6 @@
 #include <Gui/LidarWidget.h>
 #include <QHBoxLayout>
+#include <QSignalBlocker>
 #include <QStackedLayout>
 #include <QStandardItemModel>
 #include <QVBoxLayout>
@@ -30,6 +31,13 @@ LidarWidget::LidarWidget(QWidget* parent)
     setSegmentationAvailable(false, "No segmentation model configured");
     header->addTool(colorBox);
 
+    deviceBox = new QComboBox(this);
+    deviceBox->addItem("GPU", static_cast<int>(Segmenter::Device::Gpu));
+    deviceBox->addItem("CPU", static_cast<int>(Segmenter::Device::Cpu));
+    deviceBox->setToolTip("Where the segmentation model runs (segmentation mode)");
+    setSegmentationDevice(Segmenter::Device::Cpu);
+    header->addTool(deviceBox);
+
     overlayBox = new QCheckBox("Image overlay", this);
     overlayBox->setToolTip("Show the segmentation classes on the camera images (segmentation mode)");
     header->addTool(overlayBox);
@@ -43,8 +51,9 @@ LidarWidget::LidarWidget(QWidget* parent)
         updateViewControls();
         showCloud();
     });
-    birdEyeBox = new QCheckBox("Bird's-eye view", this);
-    birdEyeBox->setToolTip("Project the point cloud on the ground plane (detected in every scan) and show it from above");
+    birdEyeBox = new QCheckBox("Occupancy map", this);
+    birdEyeBox->setToolTip("The point cloud from above, projected on the ground plane (detected in every scan).\n"
+                           "Only the points in the height range of occupancy_map in sensors.json (min_height to max_height above the ground).");
     header->addTool(birdEyeBox);
     connect(birdEyeBox, &QCheckBox::toggled, this, [this](bool) {
         updateViewControls();
@@ -73,6 +82,14 @@ LidarWidget::LidarWidget(QWidget* parent)
     legendLabel->setStyleSheet(QString("color: %1; background: %2; border-radius: 6px; padding: 3px 8px;")
         .arg(Theme::viewportText.name(), Theme::viewport.name()));
     legendLabel->hide();
+
+    // Class grid, shown in the bird's-eye view in segmentation mode
+    gridBox = new QCheckBox("Class grid", this);
+    gridBox->setChecked(true);
+    gridBox->setToolTip("The occupancy map as recorded (cells of cell_size in sensors.json): occupied cells (points in the height\n"
+                        "range) in the colour of their most common class, grey when no camera saw them; free cells (only points\n"
+                        "below the range) dark grey; unknown cells empty. Off: the individual points.");
+    connect(gridBox, &QCheckBox::toggled, this, [this](bool) { showCloud(); });
 
     // Blob size, shown while the blob view is on
     blobControls = new QWidget(this);
@@ -118,6 +135,7 @@ LidarWidget::LidarWidget(QWidget* parent)
     auto* footer = new QHBoxLayout();
     footer->setSpacing(12);
     footer->addWidget(legendLabel, 1);
+    footer->addWidget(gridBox, 0, Qt::AlignBottom);
     footer->addWidget(blobControls, 0, Qt::AlignBottom);
     footer->addWidget(hintLabel, 0, Qt::AlignRight | Qt::AlignBottom);
     layout->addLayout(footer);
@@ -125,14 +143,12 @@ LidarWidget::LidarWidget(QWidget* parent)
     updateViewControls();
 }
 
-void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc) {
-    setPointCloud(std::move(pc), {}, {});
-}
-
-void LidarWidget::setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc, std::vector<uint8_t> labels,
-                                std::vector<cv::Vec3b> palette) {
+void LidarWidget::setScene(std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, const GroundPlane& plane,
+                           std::shared_ptr<const OccupancyMap> map, std::vector<uint8_t> labels, std::vector<cv::Vec3b> palette) {
     messageLabel->hide();
-    lastCloud = std::move(pc);
+    lastCloud = std::move(cloud);
+    groundPlane = plane;
+    occupancy = std::move(map);
     lastLabels = std::move(labels);
     lastPalette = std::move(palette);
     showCloud();
@@ -159,15 +175,12 @@ void LidarWidget::showCloud() {
         birdEyeWidget->clear();
         return;
     }
-
-    // ~1 ms for the plane fit; needed by the bird's-eye view and to leave the ground out of the blobs
     const bool blobView = showingBlobs();
-    if (birdEye || blobView) {
-        groundPlane = fitGroundPlane(*lastCloud, &groundPlane);
-    }
 
     // The cloud to show: everything, or only the points of the blobs that are large enough
-    std::shared_ptr<std::vector<vaiop::QtPoint>> shown = lastCloud;
+    std::shared_ptr<const std::vector<vaiop::QtPoint>> shown = lastCloud;
+    const bool labelled = lastLabels.size() == lastCloud->size();
+    std::vector<uint8_t> shownLabels = labelled && birdEye ? lastLabels : std::vector<uint8_t>{};
     std::vector<Blob> blobs;
     if (blobView) {
         // The ground would connect everything on it into one blob
@@ -180,20 +193,28 @@ void LidarWidget::showCloud() {
             }
         }
         BlobResult result = findBlobs(*lastCloud, lastLabels, lastPalette, minBlobPoints(), BLOB_LINK_DISTANCE, include);
-        shown = std::make_shared<std::vector<vaiop::QtPoint>>();
-        shown->reserve(lastCloud->size() / 2);
+        auto blobPoints = std::make_shared<std::vector<vaiop::QtPoint>>();
+        blobPoints->reserve(lastCloud->size() / 2);
+        shownLabels.clear();
         for (size_t i = 0; i < lastCloud->size(); ++i) {
             if (result.pointBlob[i] >= 0) {
-                shown->push_back((*lastCloud)[i]);
+                blobPoints->push_back((*lastCloud)[i]);
+                if (birdEye) {
+                    shownLabels.push_back(lastLabels[i]);
+                }
             }
         }
+        shown = blobPoints;
         blobs = std::move(result.blobs);
     }
     blobCount = blobs.size();
     updateBlobLabel();
 
     if (birdEye) {
-        birdEyeWidget->setPoints(projectToGround(*shown, groundPlane), groundPlane, projectToGround(blobs, groundPlane));
+        // Class grid: the occupancy map of the scan (with the class layer when it is segmented)
+        birdEyeWidget->setClassGrid(gridBox->isChecked() && labelled && occupancy && occupancy->hasClasses);
+        birdEyeWidget->setOccupancyMap(occupancy, lastPalette);
+        birdEyeWidget->setPoints(projectToGround(*shown, groundPlane, &shownLabels), groundPlane, projectToGround(blobs, groundPlane));
     } else {
         pointCloudWidget->setPointCloud(shown);
         pointCloudWidget->setBlobs(std::move(blobs));
@@ -208,8 +229,10 @@ void LidarWidget::updateViewControls() {
                                : "drag: rotate · right-drag: pan · scroll: zoom · double-click: reset");
     const bool segmentation = colorMode() == ColorMode::Segmentation;
     overlayBox->setEnabled(segmentation);
+    deviceBox->setEnabled(segmentation);
     blobButton->setEnabled(segmentation);
     blobControls->setVisible(segmentation && blobButton->isChecked());
+    gridBox->setVisible(segmentation && birdEye);
 }
 
 bool LidarWidget::imageOverlay() const {
@@ -218,6 +241,28 @@ bool LidarWidget::imageOverlay() const {
 
 void LidarWidget::onImageOverlayChanged(std::function<void(bool)> callback) {
     connect(overlayBox, &QCheckBox::toggled, this, [this, callback](bool) { callback(imageOverlay()); });
+}
+
+void LidarWidget::setOccupancyHeightRange(float minHeight, float maxHeight) {
+    birdEyeWidget->setHeightRange(minHeight, maxHeight);
+}
+
+void LidarWidget::setSegmentationDevice(Segmenter::Device device, const QString& gpuError) {
+    const QSignalBlocker blocker(deviceBox);
+    deviceBox->setCurrentIndex(deviceBox->findData(static_cast<int>(device)));
+    const int gpuIndex = deviceBox->findData(static_cast<int>(Segmenter::Device::Gpu));
+    deviceBox->setItemData(gpuIndex, gpuError.isEmpty() ? "Run the segmentation model on the NVIDIA GPU (CUDA)"
+                                                        : "GPU not available: " + gpuError, Qt::ToolTipRole);
+    deviceBox->setItemData(deviceBox->findData(static_cast<int>(Segmenter::Device::Cpu)),
+                           "Run the segmentation model on the CPU", Qt::ToolTipRole);
+    deviceBox->setToolTip(QString("Segmentation runs on the %1").arg(Segmenter::deviceName(device))
+                          + (gpuError.isEmpty() ? QString() : "\nGPU not available: " + gpuError));
+}
+
+void LidarWidget::onSegmentationDeviceChanged(std::function<void(Segmenter::Device)> callback) {
+    connect(deviceBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, callback](int) {
+        callback(static_cast<Segmenter::Device>(deviceBox->currentData().toInt()));
+    });
 }
 
 void LidarWidget::setInfo(const std::string& ip, double fps, uint64_t frameId, size_t nPoints, Theme::Status status) {

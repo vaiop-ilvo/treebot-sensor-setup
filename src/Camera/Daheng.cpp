@@ -1,5 +1,4 @@
 #include <Camera/Daheng.h>
-#include <Utils/AsyncWriter.h>
 #include <iostream>
 #include <chrono>
 #include <cstring>
@@ -55,7 +54,6 @@ Daheng::Daheng(const std::string& name, const std::string& ip, int rFlag, std::s
     rFlag(rFlag)
 {
     // Read in the calibrion matrix and intrinsics
-    // loadCalib(calibFileName, name, K, tLidarCam);
 
     // Initialize the camera
     if (!acquireGxLib()) {
@@ -400,18 +398,6 @@ std::shared_ptr<cv::Mat> Daheng::getCvImage()
     return imageBGR;
 }
 
-std::shared_ptr<QImage> Daheng::getQtImage()
-{
-    std::lock_guard<std::mutex> lock(imageMutex);
-    if (image.empty()) {
-        return nullptr;
-    }
-
-    // Wrap the cv::Mat with its real row stride (QImage rows are 4-byte aligned) and deep copy
-    QImage view(image.data, image.cols, image.rows, static_cast<qsizetype>(image.step), QImage::Format_RGB888);
-    return std::make_shared<QImage>(view.copy());
-}
-
 //----------------------------------------------------------------------------------
 /**
 \brief  Get description of input error code
@@ -443,35 +429,3 @@ void GetErrorString(GX_STATUS emErrorStatus)
     std::cout << errorInfo.c_str() << std::endl;
 }
 
-bool Daheng::saveFrame(const Frame& frame, const std::string& fileName)
-{
-    if (frame.image.empty()) {
-        return false;
-    }
-
-    // Convert and save on the writer pool; the frame image is shared, never modified
-    cv::Mat imageRGB = frame.image;
-    return AsyncWriter::instance().enqueue([fileName, imageRGB]() {
-        cv::Mat imageBGR;
-        cv::cvtColor(imageRGB, imageBGR, cv::COLOR_RGB2BGR);
-        if (!cv::imwrite(fileName, imageBGR)) {
-            std::cerr << "Failed to write " << fileName << std::endl;
-        }
-    });
-}
-
-bool Daheng::saveIm(const std::string& fileName)
-{
-    auto cvIm = getCvImage();
-    if (!cvIm || cvIm->empty()) {
-        std::cout << "No image available to save." << std::endl;
-        return false;
-    }
-
-    // Save the image on the writer pool
-    return AsyncWriter::instance().enqueue([fileName, cvIm]() {
-        if (!cv::imwrite(fileName, *cvIm)) {
-            std::cerr << "Failed to write " << fileName << std::endl;
-        }
-    });
-}

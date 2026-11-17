@@ -13,16 +13,22 @@
 #include <Gui/BirdEyeWidget.h>
 #include <Gui/PointCloudWidget.h>
 #include <Gui/SensorHeader.h>
+#include <Utils/OccupancyMap.h>
 #include <Utils/PointCloudColor.h>
+#include <Utils/Segmenter.h>
 
 class LidarWidget : public QFrame {
 
 public:
     LidarWidget(QWidget* parent = nullptr);
 
-    void setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc);
+    // A processed scan: the cloud with its ground plane and occupancy map (computed once in the Processor). A segmented
+    // cloud also has labels (class per point) and the class colours; they are needed for the blob view, and the
+    // occupancy map then has the class layer (class grid).
+    void setScene(std::shared_ptr<const std::vector<vaiop::QtPoint>> cloud, const GroundPlane& plane,
+                  std::shared_ptr<const OccupancyMap> occupancy, std::vector<uint8_t> labels = {},
+                  std::vector<cv::Vec3b> palette = {});
     // A segmented cloud: labels = class per point, palette = class colours. Needed for the blob view.
-    void setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> pc, std::vector<uint8_t> labels, std::vector<cv::Vec3b> palette);
     void setInfo(const std::string& ip, double fps, uint64_t frameId, size_t nPoints, Theme::Status status);
     void setOffline(const std::string& ip, const QString& reason);
     // Removes the point cloud and shows the text instead
@@ -45,16 +51,27 @@ public:
     void setLegend(const std::vector<LegendEntry>& entries, const QString& note = {});
     void clearLegend();
 
+    // Occupancy map: only the points from minHeight up to maxHeight above the ground plane [m]
+    void setOccupancyHeightRange(float minHeight, float maxHeight);
+
     // "Image overlay" check box (segmentation mode only): show the classes on the camera images
     bool imageOverlay() const;
     void onImageOverlayChanged(std::function<void(bool)> callback);
+
+    // Device drop-down of the segmentation model (segmentation mode): GPU or CPU.
+    // Shows where the model runs, without calling the callback; gpuError (tooltip) is why the GPU is not used.
+    void setSegmentationDevice(Segmenter::Device device, const QString& gpuError = {});
+    // Called when the user picks the other device
+    void onSegmentationDeviceChanged(std::function<void(Segmenter::Device)> callback);
 
 private:
     SensorHeader* header;
     PointCloudWidget* pointCloudWidget;
     BirdEyeWidget* birdEyeWidget;
-    QCheckBox* birdEyeBox;      // 3D view or bird's-eye view on the ground plane
+    QCheckBox* birdEyeBox;      // 3D view or occupancy map (top-down view on the ground plane)
+    QCheckBox* gridBox;         // Occupancy map as a class grid (segmentation mode)
     QCheckBox* overlayBox;
+    QComboBox* deviceBox;       // GPU or CPU for the segmentation model
     QToolButton* blobButton;    // Blob view: connected points of a class, small blobs filtered out (segmentation mode)
     QSlider* blobSlider;        // Minimum blob size, logarithmic (see minBlobPoints)
     QLabel* blobSizeLabel;
@@ -62,10 +79,11 @@ private:
     QWidget* blobControls;
     QLabel* hintLabel;
 
-    std::shared_ptr<std::vector<vaiop::QtPoint>> lastCloud;   // Shown again when the view is switched
+    std::shared_ptr<const std::vector<vaiop::QtPoint>> lastCloud;   // Shown again when the view is switched
     std::vector<uint8_t> lastLabels;                            // Class per point of lastCloud, empty when not segmented
     std::vector<cv::Vec3b> lastPalette;
-    GroundPlane groundPlane;                                    // Previous fit, for temporal smoothing
+    GroundPlane groundPlane;                                    // Of lastCloud
+    std::shared_ptr<const OccupancyMap> occupancy;              // Of lastCloud
 
     void showCloud();
     void updateViewControls();

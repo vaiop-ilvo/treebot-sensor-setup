@@ -23,7 +23,7 @@ public:
     explicit PointCloudWidget(QWidget* parent = nullptr);
     ~PointCloudWidget();
 
-    void setPointCloud(std::shared_ptr<std::vector<vaiop::QtPoint>> newPoints);
+    void setPointCloud(std::shared_ptr<const std::vector<vaiop::QtPoint>> newPoints);
     // Blobs drawn as translucent discs facing the viewer, with their radius in metres; empty = none
     void setBlobs(std::vector<Blob> newBlobs);
     void resetView();
@@ -60,7 +60,7 @@ private:
     bool blobsReady = false;
 
     // Points are uploaded to the GPU in paintGL (when the context is current)
-    std::shared_ptr<std::vector<vaiop::QtPoint>> points;
+    std::shared_ptr<const std::vector<vaiop::QtPoint>> points;
     bool pointsDirty = false;
     int uploadedPointCount = 0;
 

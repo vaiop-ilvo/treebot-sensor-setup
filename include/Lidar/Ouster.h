@@ -13,14 +13,7 @@
 #include <ouster/types.h>
 #include <ouster/xyzlut.h>
 
-#include <opencv2/opencv.hpp>
 #include <Utils/MetaData.hpp>
-
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl/io/ply_io.h>
-
-#include <Eigen/Dense>
 
 class Ouster
 {
@@ -39,8 +32,6 @@ private:
     ouster::sdk::core::XYZLut xyz_lut_;
     ouster::sdk::core::SensorInfo info_;
     std::unique_ptr<ouster::sdk::core::LidarScan> scan_;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pclCloud;
-    Eigen::MatrixXd eigenCloud; // N x 4 homogeneous points (only points with a return)
 public:
     // Throws when the sensor cannot be reached
     explicit Ouster(const std::string& ip);
@@ -50,18 +41,12 @@ public:
     bool scan(double timeoutSec = 0.0);
     void resetTimestamp();
 
+    // The points of the last scan with a return, coloured by distance (a new cloud every call)
     std::shared_ptr<std::vector<vaiop::QtPoint>> getPointCloud();
-    std::shared_ptr<cv::Mat> getReflectivityImage();
-    const Eigen::MatrixXd& getEigenCloud() const;
     const std::string& getIp() const;
     double getFps() const;
     uint64_t getTimeStamp() const;
     uint64_t getFrameId() const;
     uint64_t getScanCount() const;
     void getMetaData(OusterMetaData&) const;
-
-    // Queues the last point cloud to be written to disk. Returns false when there is no cloud or the write queue is full.
-    bool savePLY(const std::string& filename) const;
-    // Reads a point cloud written by savePLY, coloured by distance like getPointCloud. Returns nullptr when the file cannot be read.
-    static std::shared_ptr<std::vector<vaiop::QtPoint>> loadPLY(const std::string& filename);
 };

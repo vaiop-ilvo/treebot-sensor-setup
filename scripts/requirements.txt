@@ -1,0 +1,17 @@
+# Python packages for the scripts in this folder (bag_viewer.py).
+#
+#   python3 -m venv scripts/.venv
+#   scripts/.venv/bin/pip install -r scripts/requirements.txt
+#
+# The ROS 2 modules (rosbag2_py, rclpy, rosidl_runtime_py) are not on PyPI: they come from ROS 2 Jazzy
+# (/opt/ros/jazzy), so create the venv with the system Python 3.12 and source ROS before running:
+#
+#   source /opt/ros/jazzy/setup.bash && scripts/.venv/bin/python scripts/bag_viewer.py <rosbag folder>
+
+# Below 2: the ROS 2 Jazzy Python packages are built against numpy 1.x
+numpy>=1.26,<2
+# Headless: the regular opencv-python wheel ships its own Qt, which clashes with PyQt5 (only imdecode is used)
+opencv-python-headless>=4.8,<4.11
+PyQt5>=5.15,<5.16
+# Needed by the ROS 2 Python modules (rclpy); on the system it comes from the apt package python3-yaml
+PyYAML>=6.0,<7
