@@ -8,15 +8,43 @@
 #include <cmath>
 
 namespace {
-    // Ground grid: 1 m cells, GRID_HALF_SIZE m in every direction around the lidar
+    // Ground grid: 1 m cells, GRID_HALF_SIZE m in every direction around the robot
     constexpr int GRID_HALF_SIZE = 10;
-    constexpr float GRID_Z = -1.0f;
+    // Without a ground plane: the ground this far below the lidar
+    constexpr float DEFAULT_GROUND_Z = -1.0f;
+    // The marker lies this far above the ground, so the ground points do not cover it
+    constexpr float MARKER_LIFT = 0.03f;
+    constexpr float PI = 3.14159265f;
+
+    // Ground coordinates (forward, left, up) of the lidar frame: origin on the ground below the lidar
+    struct GroundFrame {
+        QVector3D origin, forward, left, up;
+        QVector3D at(float f, float l, float u = 0.0f) const { return origin + forward * f + left * l + up * u; }
+    };
+
+    GroundFrame groundFrame(const GroundPlane& plane)
+    {
+        GroundFrame frame;
+        if (!plane.valid) {
+            frame.up = QVector3D(0, 0, 1);
+            frame.forward = QVector3D(1, 0, 0);
+            frame.left = QVector3D(0, 1, 0);
+            frame.origin = QVector3D(0, 0, DEFAULT_GROUND_Z);
+            return frame;
+        }
+        frame.up = QVector3D(plane.normal.x(), plane.normal.y(), plane.normal.z()).normalized();
+        frame.forward = (QVector3D(1, 0, 0) - frame.up.x() * frame.up).normalized();
+        frame.left = QVector3D::crossProduct(frame.up, frame.forward);
+        frame.origin = -plane.d * frame.up;     // The point of the plane below the lidar
+        return frame;
+    }
 }
 
 PointCloudWidget::PointCloudWidget(QWidget* parent)
     : QOpenGLWidget(parent),
       vbo(QOpenGLBuffer::VertexBuffer),
       gridVbo(QOpenGLBuffer::VertexBuffer),
+      markerVbo(QOpenGLBuffer::VertexBuffer),
       quadVbo(QOpenGLBuffer::VertexBuffer),
       blobVbo(QOpenGLBuffer::VertexBuffer)
 {
@@ -39,6 +67,8 @@ PointCloudWidget::~PointCloudWidget() {
     vao.destroy();
     gridVbo.destroy();
     gridVao.destroy();
+    markerVbo.destroy();
+    markerVao.destroy();
     quadVbo.destroy();
     blobVbo.destroy();
     blobVao.destroy();
@@ -127,22 +157,8 @@ void PointCloudWidget::initializeGL() {
 
     setupVertexArray(vao, vbo);
     setupVertexArray(gridVao, gridVbo);
-
-    // Ground grid with the x (red) and y (green) axes
-    std::vector<vaiop::QtPoint> grid;
-    const QVector3D gridColor(0.18f, 0.21f, 0.26f);
-    for (int i = -GRID_HALF_SIZE; i <= GRID_HALF_SIZE; ++i) {
-        const QVector3D colorX = (i == 0) ? QVector3D(0.55f, 0.25f, 0.25f) : gridColor;
-        const QVector3D colorY = (i == 0) ? QVector3D(0.25f, 0.5f, 0.3f) : gridColor;
-        grid.push_back({QVector3D(-GRID_HALF_SIZE, i, GRID_Z), colorY});
-        grid.push_back({QVector3D(GRID_HALF_SIZE, i, GRID_Z), colorY});
-        grid.push_back({QVector3D(i, -GRID_HALF_SIZE, GRID_Z), colorX});
-        grid.push_back({QVector3D(i, GRID_HALF_SIZE, GRID_Z), colorX});
-    }
-    gridVertexCount = static_cast<int>(grid.size());
-    gridVbo.bind();
-    gridVbo.allocate(grid.data(), static_cast<int>(grid.size() * sizeof(vaiop::QtPoint)));
-    gridVbo.release();
+    setupVertexArray(markerVao, markerVbo);
+    groundDirty = true;     // Grid and marker are built in paintGL
 
     glReady = true;
     initializeBlobs();
@@ -219,6 +235,77 @@ void PointCloudWidget::initializeBlobs()
     blobsReady = true;
 }
 
+void PointCloudWidget::setGround(const GroundPlane& plane)
+{
+    ground = plane;
+    groundDirty = true;
+    update();
+}
+
+void PointCloudWidget::uploadGround()
+{
+    const GroundFrame frame = groundFrame(ground);
+
+    // Grid on the ground with the forward (red) and left (green) axes through the robot
+    std::vector<vaiop::QtPoint> grid;
+    const QVector3D gridColor(0.18f, 0.21f, 0.26f);
+    for (int i = -GRID_HALF_SIZE; i <= GRID_HALF_SIZE; ++i) {
+        const QVector3D colorForward = (i == 0) ? QVector3D(0.55f, 0.25f, 0.25f) : gridColor;
+        const QVector3D colorLeft = (i == 0) ? QVector3D(0.25f, 0.5f, 0.3f) : gridColor;
+        grid.push_back({frame.at(-GRID_HALF_SIZE, i), colorLeft});
+        grid.push_back({frame.at(GRID_HALF_SIZE, i), colorLeft});
+        grid.push_back({frame.at(i, -GRID_HALF_SIZE), colorForward});
+        grid.push_back({frame.at(i, GRID_HALF_SIZE), colorForward});
+    }
+    gridVertexCount = static_cast<int>(grid.size());
+    gridVbo.bind();
+    gridVbo.allocate(grid.data(), static_cast<int>(grid.size() * sizeof(vaiop::QtPoint)));
+    gridVbo.release();
+
+    // Robot marker in the ILVO green: arrow pointing forward and a ring on the ground, a line up to the lidar
+    const QVector3D green(Theme::ilvoGreen.redF(), Theme::ilvoGreen.greenF(), Theme::ilvoGreen.blueF());
+    const QVector3D darkGreen = green * 0.6f;
+    std::vector<vaiop::QtPoint> marker;
+    auto triangle = [&](QVector3D a, QVector3D b, QVector3D c, QVector3D color) {
+        marker.push_back({a, color});
+        marker.push_back({b, color});
+        marker.push_back({c, color});
+    };
+    auto ground2 = [&frame](float f, float l) { return frame.at(f, l, MARKER_LIFT); };
+    // Arrow: shaft from 0.5 m behind to 0.35 m ahead of the lidar, head up to 0.9 m ahead
+    triangle(ground2(-0.5f, -0.12f), ground2(0.35f, -0.12f), ground2(0.35f, 0.12f), green);
+    triangle(ground2(-0.5f, -0.12f), ground2(0.35f, 0.12f), ground2(-0.5f, 0.12f), green);
+    triangle(ground2(0.35f, -0.35f), ground2(0.9f, 0.0f), ground2(0.35f, 0.35f), green);
+    // Ring of 0.6 to 0.7 m around the lidar
+    constexpr int SEGMENTS = 48;
+    for (int i = 0; i < SEGMENTS; ++i) {
+        const float a0 = 2.0f * PI * i / SEGMENTS;
+        const float a1 = 2.0f * PI * (i + 1) / SEGMENTS;
+        const QVector3D in0 = ground2(0.6f * std::cos(a0), 0.6f * std::sin(a0));
+        const QVector3D out0 = ground2(0.7f * std::cos(a0), 0.7f * std::sin(a0));
+        const QVector3D in1 = ground2(0.6f * std::cos(a1), 0.6f * std::sin(a1));
+        const QVector3D out1 = ground2(0.7f * std::cos(a1), 0.7f * std::sin(a1));
+        triangle(in0, out0, out1, darkGreen);
+        triangle(in0, out1, in1, darkGreen);
+    }
+    markerTriangleVertices = static_cast<int>(marker.size());
+    // Line from the ground up to the lidar, and small axes at the lidar (forward red, left green, up blue)
+    marker.push_back({frame.origin, green});
+    marker.push_back({QVector3D(0, 0, 0), green});
+    constexpr float AXIS = 0.3f;
+    marker.push_back({QVector3D(0, 0, 0), QVector3D(0.9f, 0.3f, 0.3f)});
+    marker.push_back({frame.forward * AXIS, QVector3D(0.9f, 0.3f, 0.3f)});
+    marker.push_back({QVector3D(0, 0, 0), QVector3D(0.3f, 0.85f, 0.4f)});
+    marker.push_back({frame.left * AXIS, QVector3D(0.3f, 0.85f, 0.4f)});
+    marker.push_back({QVector3D(0, 0, 0), QVector3D(0.35f, 0.55f, 1.0f)});
+    marker.push_back({frame.up * AXIS, QVector3D(0.35f, 0.55f, 1.0f)});
+    markerLineVertices = static_cast<int>(marker.size()) - markerTriangleVertices;
+    markerVbo.bind();
+    markerVbo.allocate(marker.data(), static_cast<int>(marker.size() * sizeof(vaiop::QtPoint)));
+    markerVbo.release();
+    groundDirty = false;
+}
+
 void PointCloudWidget::setBlobs(std::vector<Blob> newBlobs)
 {
     blobs = std::move(newBlobs);
@@ -266,6 +353,10 @@ void PointCloudWidget::paintGL() {
         pointsDirty = false;
     }
 
+    if (groundDirty) {
+        uploadGround();
+    }
+
     shaderProgram.bind();
     shaderProgram.setUniformValue("mvp", projection * viewMatrix());
 
@@ -274,6 +365,12 @@ void PointCloudWidget::paintGL() {
     gridVao.bind();
     glDrawArrays(GL_LINES, 0, gridVertexCount);
     gridVao.release();
+
+    // Robot marker
+    markerVao.bind();
+    glDrawArrays(GL_TRIANGLES, 0, markerTriangleVertices);
+    glDrawArrays(GL_LINES, markerTriangleVertices, markerLineVertices);
+    markerVao.release();
 
     // Points
     if (uploadedPointCount > 0) {

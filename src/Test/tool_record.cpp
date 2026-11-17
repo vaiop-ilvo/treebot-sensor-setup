@@ -4,6 +4,7 @@
 // Prints per second the rows, the processing delay and the write queue; at the end the totals.
 #include <Utils/Acquisition.h>
 #include <Utils/Processor.h>
+#include <Utils/RosPublisher.h>
 #include <Utils/Recorder.h>
 #include <Utils/SegmentationWorker.h>
 #include <Utils/SensorConfig.h>
@@ -74,6 +75,15 @@ int recordCommand(int argc, char* argv[])
     // Processing delay: from the trigger to the end of the processing
     std::mutex statsMutex;
     uint64_t processed = 0, delaySumUs = 0, delayMaxUs = 0;
+    RosPublisher rosPublisher;
+    if (config.ros.enabled) {
+        std::string rosError;
+        if (rosPublisher.start(config.ros, rosError)) {
+            std::cout << "Publishing the occupancy map on " << config.ros.occupancyTopic << "\n";
+        } else {
+            std::cerr << rosError << "\n";
+        }
+    }
     Processor processor(config.occupancyMap, colorizer, &recorder, segmentation.get(),
         [&](std::shared_ptr<const ProcessedFrame> frame) {
             const uint64_t delay = hostTimeMicros() - frame->frame->triggerTs;
@@ -81,7 +91,7 @@ int recordCommand(int argc, char* argv[])
             processed++;
             delaySumUs += delay;
             delayMaxUs = std::max(delayMaxUs, delay);
-        });
+        }, &rosPublisher);
     processor.setColorMode(segment ? ColorMode::Segmentation : ColorMode::Distance, 0);
 
     std::atomic<bool> connected{false};

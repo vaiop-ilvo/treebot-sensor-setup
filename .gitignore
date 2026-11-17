@@ -1,6 +1,7 @@
 __pycache__/
 # Python virtual environments (scripts/.venv, see scripts/requirements.txt)
 .venv/
+scripts/.venv/
 python/build/
 python/dist/
 python/.tox/
@@ -57,3 +58,4 @@ libs/
 thirdparty/*
 # Segmentation models (scripts/download_models.sh)
 /models
+maps/

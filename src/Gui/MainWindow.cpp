@@ -85,8 +85,21 @@ MainWindow::MainWindow(const SensorConfig& config, QWidget *parent)
 
     setupUI();
 
+    rosPublisher = std::make_unique<RosPublisher>();
+    if (config.ros.enabled) {
+        std::string rosError;
+        if (rosPublisher->start(config.ros, rosError)) {
+            qInfo().noquote() << "Publishing the occupancy map on" << QString::fromStdString(config.ros.occupancyTopic);
+            if (segmentation->isAvailable()) {
+                rosPublisher->setClassNames(segmentation->classNames());
+            }
+        } else {
+            qWarning().noquote() << QString::fromStdString(rosError);
+        }
+    }
+
     processor = std::make_unique<Processor>(config.occupancyMap, colorizer, recorder.get(), segmentation.get(),
-        [this](std::shared_ptr<const ProcessedFrame> frame) { onProcessed(std::move(frame)); });
+        [this](std::shared_ptr<const ProcessedFrame> frame) { onProcessed(std::move(frame)); }, rosPublisher.get());
     processor->setColorMode(colorMode, tag);
 
     acquisition = std::make_unique<Acquisition>(config, calibs,
@@ -275,6 +288,9 @@ void MainWindow::onSegmented(SegmentationWorker::Result result)
     // Recorded here, on the worker thread: also the results that are not shown any more
     if (result.frame && result.frame->record) {
         recorder->writeSegmentation(*result.frame, result.cloud, result.labels, result.classMap);
+    }
+    if (result.frame && result.frame->live && result.classMap) {
+        rosPublisher->publishClasses(result.frame->triggerTs, *result.classMap);
     }
     std::lock_guard<std::mutex> lock(latestMutex);
     latestSegmentation = std::move(result);

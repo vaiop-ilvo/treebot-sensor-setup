@@ -132,6 +132,16 @@ SensorConfig SensorConfig::load(const std::string& path)
     config.occupancyMap.cellSize = static_cast<float>(occupancy["cell_size"].toDouble(config.occupancyMap.cellSize));
     config.occupancyMap.size = static_cast<float>(occupancy["size"].toDouble(config.occupancyMap.size));
 
+    const QJsonObject ros = root["ros"].toObject();
+    config.ros.enabled = ros["enabled"].toBool(config.ros.enabled);
+    config.ros.nodeName = ros["node_name"].toString(QString::fromStdString(config.ros.nodeName)).toStdString();
+    config.ros.publishOccupancy = ros["publish_occupancy_map"].toBool(config.ros.publishOccupancy);
+    config.ros.occupancyTopic = ros["occupancy_map_topic"].toString(QString::fromStdString(config.ros.occupancyTopic)).toStdString();
+    config.ros.publishClasses = ros["publish_classes"].toBool(config.ros.publishClasses);
+    config.ros.classTopic = ros["classes_topic"].toString(QString::fromStdString(config.ros.classTopic)).toStdString();
+    config.ros.publishOdom = ros["publish_odom"].toBool(config.ros.publishOdom);
+    config.ros.odomTopic = ros["odom_topic"].toString(QString::fromStdString(config.ros.odomTopic)).toStdString();
+
     const QJsonObject lidar = root["lidar"].toObject();
     config.lidarIp = lidar["ip"].toString(QString::fromStdString(config.lidarIp)).toStdString();
 
