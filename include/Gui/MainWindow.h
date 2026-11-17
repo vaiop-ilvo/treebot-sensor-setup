@@ -20,6 +20,7 @@
 #include <Utils/Frame.h>
 #include <Utils/PointCloudColor.h>
 #include <Utils/Processor.h>
+#include <Utils/RosPublisher.h>
 #include <Utils/Recorder.h>
 #include <Utils/SegmentationWorker.h>
 #include <Utils/SensorConfig.h>
@@ -84,6 +85,7 @@ private:
     // The pipeline, in the order it is built; the destructor stops it from the sensors down
     std::unique_ptr<Recorder> recorder;
     std::unique_ptr<SegmentationWorker> segmentation;
+    std::unique_ptr<RosPublisher> rosPublisher;    // Live ROS topics; before the processor that uses it
     std::unique_ptr<Processor> processor;
     std::unique_ptr<Acquisition> acquisition;
 };

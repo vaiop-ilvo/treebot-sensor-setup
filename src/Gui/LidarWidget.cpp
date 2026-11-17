@@ -216,6 +216,7 @@ void LidarWidget::showCloud() {
         birdEyeWidget->setOccupancyMap(occupancy, lastPalette);
         birdEyeWidget->setPoints(projectToGround(*shown, groundPlane, &shownLabels), groundPlane, projectToGround(blobs, groundPlane));
     } else {
+        pointCloudWidget->setGround(groundPlane);
         pointCloudWidget->setPointCloud(shown);
         pointCloudWidget->setBlobs(std::move(blobs));
     }

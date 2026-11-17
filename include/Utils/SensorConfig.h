@@ -39,6 +39,18 @@ struct OccupancyMapConfig {
     float size = 40.0f;
 };
 
+// Live ROS 2 topics (the "ros" block of sensors.json), see RosPublisher
+struct RosConfig {
+    bool enabled = false;
+    std::string nodeName = "treebot_sensors";
+    bool publishOccupancy = true;
+    std::string occupancyTopic = "/occupancy_map";
+    bool publishClasses = true;     // Class of the occupied cells (segmentation colour mode)
+    std::string classTopic = "/occupancy_map/classes";
+    bool publishOdom = true;
+    std::string odomTopic = "/robot/odom";
+};
+
 struct SensorConfig {
     std::string lidarIp = "192.168.3.150";
     std::vector<CameraInfo> cameras;
@@ -52,6 +64,7 @@ struct SensorConfig {
     std::string pointCloudColor = "distance";  // Initial point cloud colouring: distance, rgb or segmentation
     SegmentationConfig segmentation;
     OccupancyMapConfig occupancyMap;
+    RosConfig ros;
     std::string sourceFile;     // File the config was read from, empty when the defaults are used
 
     // The rig defaults (used when no config file is found)

@@ -3,6 +3,8 @@
 #include <Utils/OccupancyMap.h>
 
 #ifdef WITH_ROSBAG
+#include <Utils/RosMessages.h>
+
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -37,18 +39,10 @@
 #endif
 
 namespace {
+    using namespace rosmsg;
+
     constexpr size_t THREADS = 3;           // PNG compression of 4 cameras at 10 Hz needs more than one
     constexpr size_t MAX_QUEUED = 400;      // Tasks; ~10 s of data
-    const char* LIDAR_FRAME = "lidar";
-    const char* GROUND_FRAME = "ground";
-
-    builtin_interfaces::msg::Time toStamp(uint64_t us)
-    {
-        builtin_interfaces::msg::Time t;
-        t.sec = static_cast<int32_t>(us / 1000000);
-        t.nanosec = static_cast<uint32_t>((us % 1000000) * 1000);
-        return t;
-    }
 
     // Frame and topic name of a camera: its name in the calibration (cam1, ...), else from its index
     std::string cameraName(size_t camera, const std::vector<CameraCalib>& calibs = {})
@@ -67,54 +61,6 @@ namespace {
         f.datatype = datatype;
         f.count = 1;
         return f;
-    }
-
-    geometry_msgs::msg::Quaternion toQuaternion(const Eigen::Quaterniond& q)
-    {
-        geometry_msgs::msg::Quaternion m;
-        m.x = q.x();
-        m.y = q.y();
-        m.z = q.z();
-        m.w = q.w();
-        return m;
-    }
-
-    // ground -> lidar: the rows of the rotation are the ground axes (forward, left, up) in the lidar frame
-    geometry_msgs::msg::TransformStamped groundTransform(uint64_t stampUs, const GroundPlane& plane)
-    {
-        Eigen::Vector3d up = plane.normal.cast<double>().normalized();
-        Eigen::Vector3d forward = Eigen::Vector3d::UnitX() - up.x() * up;
-        if (forward.norm() < 1e-3) {
-            forward = Eigen::Vector3d::UnitY() - up.y() * up;
-        }
-        forward.normalize();
-        const Eigen::Vector3d left = up.cross(forward);
-        Eigen::Matrix3d groundFromLidar;
-        groundFromLidar << forward.transpose(), left.transpose(), up.transpose();
-
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = toStamp(stampUs);
-        t.header.frame_id = GROUND_FRAME;
-        t.child_frame_id = LIDAR_FRAME;
-        t.transform.translation.z = plane.sensorHeight();
-        t.transform.rotation = toQuaternion(Eigen::Quaterniond(groundFromLidar));
-        return t;
-    }
-
-    nav_msgs::msg::OccupancyGrid toOccupancyGrid(uint64_t stampUs, const OccupancyMap& map)
-    {
-        nav_msgs::msg::OccupancyGrid grid;
-        grid.header.stamp = toStamp(stampUs);
-        grid.header.frame_id = GROUND_FRAME;
-        grid.info.map_load_time = grid.header.stamp;
-        grid.info.resolution = map.cellSize;
-        grid.info.width = static_cast<uint32_t>(map.cellsX);
-        grid.info.height = static_cast<uint32_t>(map.cellsY);
-        grid.info.origin.position.x = map.originX;
-        grid.info.origin.position.y = map.originY;
-        grid.info.origin.orientation.w = 1.0;
-        grid.data = map.occupancy;
-        return grid;
     }
 
 #ifdef WITH_GRID_MAP
@@ -540,20 +486,7 @@ void BagWriter::writeRobot(uint64_t stampUs, const RobotMetaData& robot)
         return;
     }
     impl->enqueue([this, stampUs, robot]() {
-        nav_msgs::msg::Odometry odom;
-        odom.header.stamp = toStamp(stampUs);
-        odom.header.frame_id = "odom";
-        odom.child_frame_id = "base_link";
-        odom.pose.pose.position.x = robot.x;
-        odom.pose.pose.position.y = robot.y;
-        odom.pose.pose.position.z = robot.z;
-        // Roll, pitch, yaw in radians (ZYX)
-        const Eigen::Quaterniond q = Eigen::AngleAxisd(robot.yaw, Eigen::Vector3d::UnitZ())
-                                   * Eigen::AngleAxisd(robot.pitch, Eigen::Vector3d::UnitY())
-                                   * Eigen::AngleAxisd(robot.roll, Eigen::Vector3d::UnitX());
-        odom.pose.pose.orientation = toQuaternion(q);
-        odom.twist.twist.linear.x = robot.odomLngSpeed;
-        odom.twist.twist.angular.z = robot.odomAngSpeed;
+        const nav_msgs::msg::Odometry odom = toOdometry(stampUs, robot);
         impl->write(odom, "/robot/odom", stampUs);
 
         sensor_msgs::msg::NavSatFix fix;

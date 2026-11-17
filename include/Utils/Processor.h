@@ -13,19 +13,21 @@
 #include <Utils/SensorConfig.h>
 
 class Recorder;
+class RosPublisher;
 class SegmentationWorker;
 
 // Processes the frames on its own thread, once for the view and the recording: fits the ground plane (smoothed over
 // time), builds the occupancy map, colours the cloud with the cameras (RGB mode), records the frame and submits it to
-// the segmentation (segmentation mode). Frames are processed in order; when the processing falls behind, frames that
+// the segmentation (segmentation mode) and publishes it on the ROS topics. Frames are processed in order; when the processing falls behind, frames that
 // are not recorded are skipped (recorded frames never are).
 class Processor {
 public:
     using Output = std::function<void(std::shared_ptr<const ProcessedFrame>)>;
 
-    // recorder and segmentation may be nullptr; output is called on the processor thread
+    // recorder, segmentation and ros may be nullptr; output is called on the processor thread. ros publishes the
+    // live frames (not the replay).
     Processor(const OccupancyMapConfig& occupancyConfig, CameraColorizer colorizer, Recorder* recorder,
-              SegmentationWorker* segmentation, Output output);
+              SegmentationWorker* segmentation, Output output, RosPublisher* ros = nullptr);
     ~Processor();
 
     void submit(std::shared_ptr<const Frame> frame);
@@ -40,6 +42,7 @@ private:
     Recorder* const recorder;
     SegmentationWorker* const segmentation;
     const Output output;
+    RosPublisher* const ros;
 
     std::mutex mutex;
     std::condition_variable wakeUp;

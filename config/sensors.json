@@ -40,5 +40,10 @@
     "max_height": 1.5,
     "cell_size": 0.1,
     "size": 40.0
+  },
+  "ros": {
+    "enabled": true,
+    "occupancy_map_topic": "/occupancy_map",
+    "odom_topic": "/robot/odom"
   }
 }

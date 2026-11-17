@@ -11,6 +11,7 @@
 #include <QVector3D>
 #include <Lidar/QtPoint.h>
 #include <Utils/Blobs.h>
+#include <Utils/GroundPlane.h>
 #include <memory>
 #include <vector>
 
@@ -26,6 +27,10 @@ public:
     void setPointCloud(std::shared_ptr<const std::vector<vaiop::QtPoint>> newPoints);
     // Blobs drawn as translucent discs facing the viewer, with their radius in metres; empty = none
     void setBlobs(std::vector<Blob> newBlobs);
+    // Ground plane of the cloud: the grid lies on it, and the robot marker (an arrow pointing forward with a ring,
+    // on the ground below the lidar, and a line up to the lidar) shows where the treebot is. Invalid plane: 1 m below
+    // the lidar, in the lidar frame.
+    void setGround(const GroundPlane& plane);
     void resetView();
 
 protected:
@@ -50,6 +55,15 @@ private:
     QOpenGLBuffer gridVbo;
     QOpenGLVertexArrayObject gridVao;
     int gridVertexCount = 0;
+
+    // Robot marker: triangles (arrow, ring) followed by lines (pole, lidar axes), rebuilt with the ground plane
+    QOpenGLBuffer markerVbo;
+    QOpenGLVertexArrayObject markerVao;
+    int markerTriangleVertices = 0;
+    int markerLineVertices = 0;
+    GroundPlane ground;
+    bool groundDirty = true;
+    void uploadGround();
 
     // Blobs: one quad per blob (instanced), turned into a disc in the fragment shader
     QOpenGLShaderProgram blobProgram;

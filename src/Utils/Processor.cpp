@@ -1,6 +1,7 @@
 #include <Utils/Processor.h>
 
 #include <Utils/Recorder.h>
+#include <Utils/RosPublisher.h>
 #include <Utils/SegmentationWorker.h>
 
 #include <algorithm>
@@ -11,12 +12,13 @@ namespace {
 }
 
 Processor::Processor(const OccupancyMapConfig& occupancyConfig, CameraColorizer colorizer, Recorder* recorder,
-                     SegmentationWorker* segmentation, Output output)
+                     SegmentationWorker* segmentation, Output output, RosPublisher* ros)
     : occupancyConfig(occupancyConfig),
       colorizer(std::move(colorizer)),
       recorder(recorder),
       segmentation(segmentation),
       output(std::move(output)),
+      ros(ros),
       thread(&Processor::run, this)
 {
 }
@@ -106,6 +108,10 @@ void Processor::process(const std::shared_ptr<const Frame>& frame, ColorMode mod
             result->occupancy = std::make_shared<const OccupancyMap>(
                 buildOccupancyMap(projectToGround(*frame->cloud, plane), occupancyConfig, false));
         }
+    }
+
+    if (ros && frame->live) {
+        ros->publish(*result);
     }
 
     const bool segmenting = mode == ColorMode::Segmentation && segmentation && segmentation->isAvailable();
